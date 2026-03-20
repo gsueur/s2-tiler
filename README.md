@@ -217,6 +217,16 @@ Tiles served at:
 
 ---
 
+## Tests
+
+```bash
+cargo test
+```
+
+Covers: tile math (z=0 bbox, quadkey encoding), UTM projection (Massachusetts, UTM18N), quadkey covering functions, SCL valid class detection, best_pixel and median compositing logic.
+
+---
+
 ## Architecture
 
 ```
