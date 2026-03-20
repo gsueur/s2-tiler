@@ -1,11 +1,14 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Composite {
     BestPixel,
     Median,
     Latest,
+    /// NDVI = (NIR - Red) / (NIR + Red). Requires exactly 2 bands: [NIR, Red] (e.g. [B08, B04]).
+    /// Rescale values are interpreted as NDVI float range, e.g. rescale: [-1, 1] or [0, 1].
+    Ndvi,
 }
 
 impl Default for Composite {
@@ -226,10 +229,16 @@ impl S2Config {
         anyhow::ensure!(!self.name.is_empty(), "tileset name must not be empty");
         anyhow::ensure!(!self.years.is_empty(), "years must not be empty");
         anyhow::ensure!(!self.bands.is_empty(), "bands must not be empty");
-        anyhow::ensure!(
-            self.bands.len() == 3 || self.bands.len() == 1,
-            "bands must have 1 (grayscale) or 3 (RGB) entries"
-        );
+        match &self.composite {
+            Composite::Ndvi => anyhow::ensure!(
+                self.bands.len() == 2,
+                "composite: ndvi requires exactly 2 bands: [NIR, Red] (e.g. [B08, B04])"
+            ),
+            _ => anyhow::ensure!(
+                self.bands.len() == 1 || self.bands.len() == 3,
+                "bands must have 1 (grayscale) or 3 (RGB) entries"
+            ),
+        }
         anyhow::ensure!(self.minzoom <= self.maxzoom, "minzoom must be <= maxzoom");
         anyhow::ensure!(
             self.extent[0] < self.extent[2] && self.extent[1] < self.extent[3],

@@ -19,6 +19,8 @@ pub struct SceneTile {
     pub data: Array3<u16>,
     /// Valid pixel mask: shape (256, 256), true = pixel is valid (not cloud/nodata)
     pub mask: Array2<bool>,
+    /// NDVI values in [-1, 1] — set only when composite = ndvi; render uses this in place of data.
+    pub ndvi: Option<Array2<f32>>,
 }
 
 impl SceneTile {
@@ -26,6 +28,7 @@ impl SceneTile {
         Self {
             data: Array3::zeros((bands, size, size)),
             mask: Array2::from_elem((size, size), false),
+            ndvi: None,
         }
     }
 
@@ -43,7 +46,7 @@ pub fn apply_scl_mask(data: Array3<u16>, scl: &Array2<u8>) -> SceneTile {
     let h = data.shape()[1];
     let w = data.shape()[2];
     let mask = Array2::from_shape_fn((h, w), |(r, c)| scl_is_valid(scl[[r, c]]));
-    SceneTile { data, mask }
+    SceneTile { data, mask, ndvi: None }
 }
 
 /// Composite multiple scene tiles using the configured strategy.
@@ -56,6 +59,10 @@ pub fn composite(scenes: Vec<SceneTile>, strategy: &Composite) -> SceneTile {
     match strategy {
         Composite::BestPixel | Composite::Latest => best_pixel(scenes),
         Composite::Median => median(scenes),
+        Composite::Ndvi => {
+            let composited = best_pixel(scenes);
+            compute_ndvi(composited)
+        }
     }
 }
 
@@ -87,6 +94,7 @@ fn best_pixel(scenes: Vec<SceneTile>) -> SceneTile {
     SceneTile {
         data: result_data,
         mask: result_mask,
+        ndvi: None,
     }
 }
 
@@ -118,6 +126,7 @@ fn median(scenes: Vec<SceneTile>) -> SceneTile {
     SceneTile {
         data: result_data,
         mask: result_mask,
+        ndvi: None,
     }
 }
 
@@ -134,6 +143,36 @@ fn median_u16(vals: &[u16]) -> u16 {
     }
 }
 
+/// Compute per-pixel NDVI from a 2-band composited tile (band 0 = NIR, band 1 = Red).
+///
+/// Returns a 1-band SceneTile with `ndvi` set to f32 values in [-1, 1].
+/// Invalid pixels (mask = false) get NDVI = 0.0.
+fn compute_ndvi(composited: SceneTile) -> SceneTile {
+    let size = composited.size();
+    let mut ndvi_arr = Array2::<f32>::zeros((size, size));
+
+    for row in 0..size {
+        for col in 0..size {
+            if composited.mask[[row, col]] {
+                let nir = composited.data[[0, row, col]] as f32;
+                let red = composited.data[[1, row, col]] as f32;
+                let denom = nir + red;
+                ndvi_arr[[row, col]] = if denom > 0.0 {
+                    ((nir - red) / denom).clamp(-1.0, 1.0)
+                } else {
+                    0.0
+                };
+            }
+        }
+    }
+
+    SceneTile {
+        data: Array3::zeros((1, size, size)), // unused when ndvi is Some
+        mask: composited.mask,
+        ndvi: Some(ndvi_arr),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,7 +180,7 @@ mod tests {
     fn make_scene(val: u16, valid: bool, size: usize) -> SceneTile {
         let data = Array3::from_elem((3, size, size), val);
         let mask = Array2::from_elem((size, size), valid);
-        SceneTile { data, mask }
+        SceneTile { data, mask, ndvi: None }
     }
 
     #[test]
