@@ -214,7 +214,8 @@ quadkey covering functions.
   static seasonal composites, not near-realtime use
 - **Median composite is expensive**: reads all scenes regardless of pixel fill; avoid for
   large extents or many scenes
-- **Index file format**: plain JSON; large extents (Europe × 3 years) may produce 50–200MB files;
-  consider binary format or SQLite for those cases
+- **Index file format**: DuckDB (bundled, `duckdb = "1"`). Schema: `meta`, `scenes` (bands as JSON
+  column), `scene_quadkeys` with index on `quadkey`. First build after adding the dep takes ~2min
+  (C++ compile); subsequent builds are incremental. File is overwritten on each save.
 - **No authentication**: COGs are fetched from public S3 (Element84 Earth Search); for MPC
   (Azure Planetary Computer), assets require signing via `planetary_computer.sign()`

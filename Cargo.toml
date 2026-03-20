@@ -20,7 +20,7 @@ tower = "0.5"
 
 # COG reading (async, no GDAL)
 async-tiff = { version = "0.2", features = ["object_store"] }
-object_store = { version = "0.13", features = ["http"] }
+object_store = { version = "0.13", features = ["http", "aws"] }
 
 # HTTP client (STAC search) — must match async-tiff's reqwest version
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
@@ -50,6 +50,10 @@ anyhow = "1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Index + tile cache persistence
+duckdb = { version = "1", features = ["bundled"] }
+async-trait = "0.1"
 
 # Misc
 bytes = "1"

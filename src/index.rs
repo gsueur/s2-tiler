@@ -147,16 +147,144 @@ pub fn build_index(items: &[StacItem], config: &S2Config) -> MosaicIndex {
     }
 }
 
-/// Serialize index to JSON for fast reload on restart.
-pub fn save_index(index: &MosaicIndex, path: &str) -> anyhow::Result<()> {
-    let json = serde_json::to_string(index)?;
-    std::fs::write(path, json)?;
+/// Ensure the shared index database schema exists.
+fn init_schema(conn: &duckdb::Connection) -> anyhow::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS meta (
+             tileset      TEXT    NOT NULL PRIMARY KEY,
+             quadkey_zoom INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS scenes (
+             tileset  TEXT    NOT NULL,
+             idx      INTEGER NOT NULL,
+             id       TEXT    NOT NULL,
+             cloud    DOUBLE  NOT NULL,
+             dt       TEXT    NOT NULL,
+             epsg     INTEGER NOT NULL,
+             scl_url  TEXT    NOT NULL,
+             bands    TEXT    NOT NULL,
+             PRIMARY KEY (tileset, idx)
+         );
+         CREATE TABLE IF NOT EXISTS scene_quadkeys (
+             tileset   TEXT    NOT NULL,
+             quadkey   BIGINT  NOT NULL,
+             scene_idx INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS qk_idx ON scene_quadkeys(tileset, quadkey);",
+    )?;
     Ok(())
 }
 
-/// Deserialize index from JSON file.
-pub fn load_index(path: &str) -> anyhow::Result<MosaicIndex> {
-    let json = std::fs::read_to_string(path)?;
-    let index: MosaicIndex = serde_json::from_str(&json)?;
-    Ok(index)
+/// Persist a tileset's mosaic index into the shared DuckDB database at `path`.
+///
+/// Creates the file and schema on first use. Replaces existing rows for `tileset`.
+pub fn save_index(index: &MosaicIndex, tileset: &str, path: &str) -> anyhow::Result<()> {
+    let conn = duckdb::Connection::open(path)?;
+    init_schema(&conn)?;
+
+    // Replace existing data for this tileset.
+    conn.execute("DELETE FROM scene_quadkeys WHERE tileset = ?", duckdb::params![tileset])?;
+    conn.execute("DELETE FROM scenes WHERE tileset = ?", duckdb::params![tileset])?;
+    conn.execute("DELETE FROM meta WHERE tileset = ?", duckdb::params![tileset])?;
+
+    conn.execute(
+        "INSERT INTO meta VALUES (?, ?)",
+        duckdb::params![tileset, index.quadkey_zoom as i32],
+    )?;
+
+    {
+        let mut app = conn.appender("scenes")?;
+        for (idx, s) in index.scenes.iter().enumerate() {
+            let bands = serde_json::to_string(&s.band_urls)?;
+            app.append_row(duckdb::params![
+                tileset,
+                idx as i32,
+                s.id.as_str(),
+                s.cloud_cover,
+                s.datetime.as_str(),
+                s.epsg as i32,
+                s.scl_url.as_str(),
+                bands.as_str()
+            ])?;
+        }
+        app.flush()?;
+    }
+
+    {
+        let mut app = conn.appender("scene_quadkeys")?;
+        for (qk, indices) in &index.index {
+            for &scene_idx in indices {
+                app.append_row(duckdb::params![tileset, *qk as i64, scene_idx as i32])?;
+            }
+        }
+        app.flush()?;
+    }
+
+    Ok(())
+}
+
+/// Load a tileset's mosaic index from the shared DuckDB database at `path`.
+pub fn load_index(tileset: &str, path: &str) -> anyhow::Result<MosaicIndex> {
+    let conn = duckdb::Connection::open(path)?;
+
+    let quadkey_zoom: u8 = {
+        let v: i32 = conn.query_row(
+            "SELECT quadkey_zoom FROM meta WHERE tileset = ?",
+            duckdb::params![tileset],
+            |row| row.get(0),
+        )?;
+        v as u8
+    };
+
+    let mut stmt = conn.prepare(
+        "SELECT idx, id, cloud, dt, epsg, scl_url, bands
+         FROM scenes WHERE tileset = ? ORDER BY idx",
+    )?;
+    let mut scenes: Vec<SceneRef> = Vec::new();
+    let rows = stmt.query_map(duckdb::params![tileset], |row| {
+        Ok((
+            row.get::<_, i32>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, f64>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, i32>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, String>(6)?,
+        ))
+    })?;
+    for row in rows {
+        let (_, id, cloud_cover, datetime, epsg, scl_url, bands_json) = row?;
+        let band_urls = serde_json::from_str(&bands_json)?;
+        scenes.push(SceneRef {
+            id,
+            cloud_cover,
+            datetime,
+            epsg: epsg as u32,
+            scl_url,
+            band_urls,
+        });
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT quadkey, scene_idx FROM scene_quadkeys WHERE tileset = ?",
+    )?;
+    let mut index: HashMap<u64, Vec<usize>> = HashMap::new();
+    let rows = stmt.query_map(duckdb::params![tileset], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, i32>(1)?))
+    })?;
+    for row in rows {
+        let (qk, scene_idx) = row?;
+        index
+            .entry(qk as u64)
+            .or_default()
+            .push(scene_idx as usize);
+    }
+
+    let total_scenes = scenes.len();
+    Ok(MosaicIndex {
+        scenes,
+        index,
+        quadkey_zoom,
+        total_scenes,
+    })
 }

@@ -1,0 +1,18 @@
+port: 3000
+minzoom: 10
+maxzoom: 15
+quadkey_zoom: 8
+stac_url: https://earth-search.aws.element84.com/v1
+collection: sentinel-2-l2a
+index_path: tilesets.db
+
+tilesets:
+  - name: massachusetts
+    extent: [-73.6, 41.2, -69.8, 42.9]   # [west, south, east, north] WGS84
+    years: [2023, 2024, 2025]
+    season: [6, 7, 8]                     # June-July-August
+    max_cloud_cover: 20
+    bands: [B04, B03, B02]               # true color RGB
+    composite: best_pixel
+    rescale: [0, 3000]                    # S2 L2A SR range → [0, 255]
+    max_scenes_per_tile: 12
