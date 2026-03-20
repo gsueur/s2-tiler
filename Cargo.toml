@@ -1,0 +1,57 @@
+[package]
+name = "s2-tiler"
+version = "0.1.0"
+edition = "2021"
+description = "Standalone async Sentinel-2 COG tile server"
+
+[[bin]]
+name = "s2-tiler"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+# HTTP server
+axum = { version = "0.8", features = ["json"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+tower = "0.5"
+
+# COG reading (async, no GDAL)
+async-tiff = { version = "0.2", features = ["object_store"] }
+object_store = { version = "0.13", features = ["http"] }
+
+# HTTP client (STAC search) — must match async-tiff's reqwest version
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+
+# CRS transforms (pure Rust, no libproj)
+proj4rs = "0.1"
+
+# Raster array ops
+ndarray = "0.15"
+
+# Image encoding (PNG / JPEG) — pinned to 0.24.x for Rust 1.85 compatibility
+image = { version = "0.24", default-features = false, features = ["png", "jpeg"] }
+
+# Concurrent header cache
+dashmap = "6"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Error handling & logging
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Misc
+bytes = "1"
+url = "2"
+chrono = { version = "0.4", features = ["serde"] }

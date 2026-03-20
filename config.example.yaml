@@ -1,0 +1,21 @@
+# S2 Tiler — example configuration
+# Covers Massachusetts (JJA 2023, true color, <20% cloud)
+
+extent: [-73.6, 41.2, -69.8, 42.9]   # [west, south, east, north] WGS84
+years: [2023]
+season: [6, 7, 8]                     # June-July-August
+max_cloud_cover: 20
+
+bands: [B04, B03, B02]               # true color RGB
+composite: best_pixel                 # best_pixel | median | latest
+rescale: [0, 3000]                    # S2 L2A SR range → [0, 255]
+
+minzoom: 10
+maxzoom: 15
+quadkey_zoom: 8
+
+stac_url: https://earth-search.aws.element84.com/v1
+collection: sentinel-2-l2a
+
+port: 3000
+max_scenes_per_tile: 6
