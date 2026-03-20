@@ -118,6 +118,21 @@ pub fn band_to_asset(band: &str) -> Option<&'static str> {
     }
 }
 
+fn days_in_month(year: u32, month: u8) -> u8 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 30,
+    }
+}
+
 impl S2Config {
     pub fn from_yaml_file(path: &str) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
@@ -150,19 +165,23 @@ impl S2Config {
         Ok(())
     }
 
-    /// Return datetime range strings for STAC search (one per year × season combination)
+    /// Return RFC3339 datetime range strings for STAC search (one per year × season).
     pub fn datetime_ranges(&self) -> Vec<String> {
         let mut ranges = Vec::new();
         for &year in &self.years {
             if let Some(months) = &self.season {
-                // Group consecutive months into ranges
                 if !months.is_empty() {
                     let min_m = months.iter().copied().min().unwrap();
                     let max_m = months.iter().copied().max().unwrap();
-                    ranges.push(format!("{year}-{min_m:02}-01/{year}-{max_m:02}-28"));
+                    // Last day of max_m — use the 1st of the following month minus 1 day
+                    // Simple approximation: use last day 28 (safe) then set time to end of day
+                    let end_day = days_in_month(year, max_m);
+                    ranges.push(format!(
+                        "{year}-{min_m:02}-01T00:00:00Z/{year}-{max_m:02}-{end_day:02}T23:59:59Z"
+                    ));
                 }
             } else {
-                ranges.push(format!("{year}-01-01/{year}-12-31"));
+                ranges.push(format!("{year}-01-01T00:00:00Z/{year}-12-31T23:59:59Z"));
             }
         }
         ranges

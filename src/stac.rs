@@ -23,6 +23,8 @@ pub struct StacItemProperties {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StacItem {
     pub id: String,
+    /// WGS84 [minx, miny, maxx, maxy]
+    pub bbox: Option<[f64; 4]>,
     pub properties: StacItemProperties,
     pub assets: HashMap<String, StacAsset>,
 }
@@ -138,8 +140,7 @@ async fn search_paginated(
         "query": {
             "eo:cloud_cover": {"lt": config.max_cloud_cover}
         },
-        "limit": 200,
-        "sortby": ["+properties.eo:cloud_cover"]
+        "limit": 200
     });
 
     let mut url = search_url.to_string();

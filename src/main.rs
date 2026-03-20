@@ -93,6 +93,7 @@ async fn main() -> Result<()> {
         cog_reader: CogReader::new(),
         http_client,
         index_path: cli.index_path,
+        tile_cache: dashmap::DashMap::new(),
     });
 
     let router = build_router(state);

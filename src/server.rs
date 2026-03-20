@@ -14,6 +14,8 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use bytes::Bytes;
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -27,13 +29,16 @@ pub struct AppState {
     pub cog_reader: CogReader,
     pub http_client: reqwest::Client,
     pub index_path: Option<String>,
+    /// In-memory tile cache: (z, x, y, format_str) → encoded image bytes.
+    /// Invalidated when the index is rebuilt via POST /build.
+    pub tile_cache: DashMap<(u8, u32, u32, String), Bytes>,
 }
 
 // ─── Router ─────────────────────────────────────────────────────────────────
 
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
-        .route("/:z/:x/:y", get(tile_handler))
+        .route("/{z}/{x}/{y}", get(tile_handler))
         .route("/tilejson.json", get(tilejson_handler))
         .route("/config", get(config_handler))
         .route("/info", get(info_handler))
@@ -74,6 +79,16 @@ async fn tile_handler(
         }
     };
 
+    // Check tile cache first
+    let cache_key = (z, x, y, params.format.clone());
+    if let Some(cached) = state.tile_cache.get(&cache_key) {
+        return (
+            [(header::CONTENT_TYPE, format.content_type())],
+            cached.clone(),
+        )
+            .into_response();
+    }
+
     let index = state.index.read().await;
 
     let tile_result =
@@ -82,11 +97,14 @@ async fn tile_handler(
     match tile_result {
         Ok(Some(tile)) => {
             match encode_tile(&tile, config.rescale, format) {
-                Ok(bytes) => (
-                    [(header::CONTENT_TYPE, format.content_type())],
-                    bytes,
-                )
-                    .into_response(),
+                Ok(bytes) => {
+                    state.tile_cache.insert(cache_key, bytes.clone());
+                    (
+                        [(header::CONTENT_TYPE, format.content_type())],
+                        bytes,
+                    )
+                        .into_response()
+                }
                 Err(e) => {
                     error!("Encode error for {z}/{x}/{y}: {e:#}");
                     (StatusCode::INTERNAL_SERVER_ERROR, "encode error").into_response()
@@ -131,7 +149,7 @@ async fn tilejson_handler(State(state): State<Arc<AppState>>) -> impl IntoRespon
     Json(TileJson {
         tilejson: "2.2.0",
         name: "s2-tiler",
-        tiles: vec![format!("http://localhost:{}{{z}}/{{x}}/{{y}}?format=png", c.port)],
+        tiles: vec![format!("http://localhost:{}/{{z}}/{{x}}/{{y}}?format=png", c.port)],
         minzoom: c.minzoom,
         maxzoom: c.maxzoom,
         bounds: [west, south, east, north],
@@ -190,6 +208,7 @@ async fn build_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse 
             }
 
             *state.index.write().await = new_index;
+            state.tile_cache.clear();
             (StatusCode::OK, format!("Index rebuilt: {n} scenes")).into_response()
         }
         Err(e) => {

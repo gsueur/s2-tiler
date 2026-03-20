@@ -202,13 +202,89 @@ pub fn nn_sample_u8(src: &Array2<u8>, col: f64, row: f64) -> u8 {
     }
 }
 
+/// Precompute a WebMercator→UTM coordinate grid for all output pixels.
+///
+/// Returns a flat `Vec<(f64, f64)>` of (utm_x, utm_y) indexed as `row * output_size + col`.
+/// Invalid projections are stored as `(f64::NAN, f64::NAN)`.
+/// Call this once per scene; reuse the result for all bands and SCL.
+pub fn precompute_wm_to_utm_grid(
+    tile_bbox: &Bbox,
+    epsg: u32,
+    output_size: u32,
+) -> Result<Vec<(f64, f64)>> {
+    use proj4rs::{transform::transform, Proj};
+    let n = output_size as usize;
+    let dst_pw = tile_bbox.width() / output_size as f64;
+    let dst_ph = tile_bbox.height() / output_size as f64;
+
+    let wgs84 = Proj::from_proj_string("+proj=longlat +datum=WGS84 +no_defs")?;
+    let utm = Proj::from_proj_string(&epsg_to_proj_string(epsg)?)?;
+
+    let mut grid = Vec::with_capacity(n * n);
+    for row in 0..n {
+        for col in 0..n {
+            let wm_x = tile_bbox.x_min + (col as f64 + 0.5) * dst_pw;
+            let wm_y = tile_bbox.y_max - (row as f64 + 0.5) * dst_ph;
+            let (lon, lat) = webmercator_to_wgs84(wm_x, wm_y);
+            let mut pt = (lon.to_radians(), lat.to_radians(), 0.0_f64);
+            if transform(&wgs84, &utm, &mut pt).is_ok() {
+                grid.push((pt.0, pt.1));
+            } else {
+                grid.push((f64::NAN, f64::NAN));
+            }
+        }
+    }
+    Ok(grid)
+}
+
+/// Warp a u16 band using a precomputed UTM grid (from `precompute_wm_to_utm_grid`).
+pub fn warp_band_with_grid(
+    src: &Array2<u16>,
+    src_affine: &Affine,
+    grid: &[(f64, f64)],
+    output_size: u32,
+) -> Array2<u16> {
+    let n = output_size as usize;
+    let mut dst = Array2::<u16>::zeros((n, n));
+    for row in 0..n {
+        for col in 0..n {
+            let (utm_x, utm_y) = grid[row * n + col];
+            if utm_x.is_nan() {
+                continue;
+            }
+            let (src_col, src_row) = src_affine.crs_to_pixel(utm_x, utm_y);
+            dst[[row, col]] = bilinear_sample_u16(src, src_col, src_row);
+        }
+    }
+    dst
+}
+
+/// Warp a u8 band (e.g. SCL) using a precomputed UTM grid, nearest-neighbour.
+pub fn warp_scl_with_grid(
+    src: &Array2<u8>,
+    src_affine: &Affine,
+    grid: &[(f64, f64)],
+    output_size: u32,
+) -> Array2<u8> {
+    let n = output_size as usize;
+    let mut dst = Array2::<u8>::zeros((n, n));
+    for row in 0..n {
+        for col in 0..n {
+            let (utm_x, utm_y) = grid[row * n + col];
+            if utm_x.is_nan() {
+                continue;
+            }
+            let (src_col, src_row) = src_affine.crs_to_pixel(utm_x, utm_y);
+            dst[[row, col]] = nn_sample_u8(src, src_col, src_row);
+        }
+    }
+    dst
+}
+
 /// Warp a single-band u16 array from UTM (src_affine) to a WebMercator 256×256 grid.
 ///
-/// * `src`         — raster in source UTM CRS
-/// * `src_affine`  — affine transform of `src` (origin in UTM meters)
-/// * `epsg`        — UTM EPSG code of `src`
-/// * `tile_bbox`   — WebMercator bbox of the output tile (meters)
-/// * `output_size` — output tile size in pixels (typically 256)
+/// Convenience wrapper around `precompute_wm_to_utm_grid` + `warp_band_with_grid`.
+/// When warping multiple bands for the same scene, prefer calling those directly.
 pub fn warp_band_to_webmercator(
     src: &Array2<u16>,
     src_affine: &Affine,
@@ -216,44 +292,14 @@ pub fn warp_band_to_webmercator(
     tile_bbox: &Bbox,
     output_size: u32,
 ) -> Result<Array2<u16>> {
-    let n = output_size as usize;
-    let mut dst = Array2::<u16>::zeros((n, n));
-
-    let dst_pw = tile_bbox.width() / output_size as f64;
-    let dst_ph = tile_bbox.height() / output_size as f64;
-
-    // Pre-build proj4rs projections (cheap, string-parsed once per call)
-    use proj4rs::{transform::transform, Proj};
-    let wgs84 = Proj::from_proj_string("+proj=longlat +datum=WGS84 +no_defs")?;
-    let utm = Proj::from_proj_string(&epsg_to_proj_string(epsg)?)?;
-
-    for row in 0..n {
-        for col in 0..n {
-            // WebMercator pixel center
-            let wm_x = tile_bbox.x_min + (col as f64 + 0.5) * dst_pw;
-            let wm_y = tile_bbox.y_max - (row as f64 + 0.5) * dst_ph;
-
-            // → WGS84
-            let (lon, lat) = webmercator_to_wgs84(wm_x, wm_y);
-
-            // → UTM
-            let mut pt = (lon.to_radians(), lat.to_radians(), 0.0_f64);
-            if transform(&wgs84, &utm, &mut pt).is_err() {
-                continue;
-            }
-            let (utm_x, utm_y) = (pt.0, pt.1);
-
-            // → pixel in source raster
-            let (src_col, src_row) = src_affine.crs_to_pixel(utm_x, utm_y);
-
-            dst[[row, col]] = bilinear_sample_u16(src, src_col, src_row);
-        }
-    }
-
-    Ok(dst)
+    let grid = precompute_wm_to_utm_grid(tile_bbox, epsg, output_size)?;
+    Ok(warp_band_with_grid(src, src_affine, &grid, output_size))
 }
 
 /// Warp a u8 band (e.g. SCL) from UTM to WebMercator 256×256, using nearest-neighbour.
+///
+/// Convenience wrapper. When warping SCL + multiple bands for the same scene,
+/// use `precompute_wm_to_utm_grid` + `warp_scl_with_grid` instead.
 pub fn warp_scl_to_webmercator(
     src: &Array2<u8>,
     src_affine: &Affine,
@@ -261,30 +307,8 @@ pub fn warp_scl_to_webmercator(
     tile_bbox: &Bbox,
     output_size: u32,
 ) -> Result<Array2<u8>> {
-    use proj4rs::{transform::transform, Proj};
-    let n = output_size as usize;
-    let mut dst = Array2::<u8>::zeros((n, n));
-    let dst_pw = tile_bbox.width() / output_size as f64;
-    let dst_ph = tile_bbox.height() / output_size as f64;
-
-    let wgs84 = Proj::from_proj_string("+proj=longlat +datum=WGS84 +no_defs")?;
-    let utm = Proj::from_proj_string(&epsg_to_proj_string(epsg)?)?;
-
-    for row in 0..n {
-        for col in 0..n {
-            let wm_x = tile_bbox.x_min + (col as f64 + 0.5) * dst_pw;
-            let wm_y = tile_bbox.y_max - (row as f64 + 0.5) * dst_ph;
-            let (lon, lat) = webmercator_to_wgs84(wm_x, wm_y);
-            let mut pt = (lon.to_radians(), lat.to_radians(), 0.0_f64);
-            if transform(&wgs84, &utm, &mut pt).is_err() {
-                continue;
-            }
-            let (src_col, src_row) = src_affine.crs_to_pixel(pt.0, pt.1);
-            dst[[row, col]] = nn_sample_u8(src, src_col, src_row);
-        }
-    }
-
-    Ok(dst)
+    let grid = precompute_wm_to_utm_grid(tile_bbox, epsg, output_size)?;
+    Ok(warp_scl_with_grid(src, src_affine, &grid, output_size))
 }
 
 // ─── Quadkey index helpers ──────────────────────────────────────────────────
@@ -307,9 +331,7 @@ pub fn wgs84_to_tile(lon: f64, lat: f64, z: u8) -> (u32, u32) {
     let x = ((lon + 180.0) / 360.0 * n).floor() as u32;
     let lat_rad = lat.to_radians();
     let y = ((1.0
-        - (lat_rad.tan() + 1.0 / lat_rad.cos())
-            .ln()
-            .div_euclid(std::f64::consts::PI))
+        - (lat_rad.tan() + 1.0 / lat_rad.cos()).ln() / std::f64::consts::PI)
         / 2.0
         * n)
         .floor() as u32;
@@ -386,5 +408,15 @@ mod tests {
         // tile at z=6, qz=8: each tile covers 4×4 quadkeys
         let qks = tile_to_covering_quadkeys(6, 32, 20, 8);
         assert_eq!(qks.len(), 16);
+    }
+
+    #[test]
+    fn test_wgs84_to_utm18n_massachusetts() {
+        // lon=-71.71, lat=43.0 → UTM18N: expected ~766000 easting, ~4766000 northing
+        let (e, n) = wgs84_to_utm(-71.71, 43.0, 32618).unwrap();
+        println!("UTM18N: e={e:.0}, n={n:.0}");
+        // False easting = 500000; central meridian -75°; offset = 3.29° ≈ 266000m
+        assert!((e - 766000.0).abs() < 5000.0, "easting {e} not near 766000");
+        assert!((n - 4766000.0).abs() < 5000.0, "northing {n} not near 4766000");
     }
 }

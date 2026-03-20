@@ -108,15 +108,23 @@ pub fn build_index(items: &[StacItem], config: &S2Config) -> MosaicIndex {
             epsg,
         });
 
-        // Determine which quadkeys this scene covers.
-        // We use the scene's bbox (from the extent) intersected with the config extent.
-        // Since we don't have per-item bbox here easily, use a heuristic:
-        // compute quadkeys from the config extent and assign all scenes to all cells.
-        // Then at query time, scenes that don't actually cover the tile are filtered by warp.
-        //
-        // For a production system, we'd compute the scene's actual footprint quadkeys.
-        // For now, index all scenes under all quadkeys in the config extent.
-        let qks = bbox_to_quadkeys(config.extent, qz);
+        // Assign this scene to all quadkeys it intersects.
+        // Use the per-item WGS84 bbox from STAC, clipped to the config extent.
+        let item_bbox = match item.bbox {
+            Some(b) => b,
+            None => config.extent, // fallback: no per-item bbox, assume full extent
+        };
+        // Intersect item bbox with config extent
+        let clipped = [
+            item_bbox[0].max(config.extent[0]),
+            item_bbox[1].max(config.extent[1]),
+            item_bbox[2].min(config.extent[2]),
+            item_bbox[3].min(config.extent[3]),
+        ];
+        if clipped[0] >= clipped[2] || clipped[1] >= clipped[3] {
+            continue; // item doesn't overlap config extent at all
+        }
+        let qks = bbox_to_quadkeys(clipped, qz);
         for qk in qks {
             index.entry(qk).or_default().push(scene_idx);
         }

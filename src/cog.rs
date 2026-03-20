@@ -26,7 +26,10 @@ struct CachedCog {
 
 #[derive(Clone)]
 pub struct CogReader {
+    /// IFD metadata cache: URL → parsed TIFF + reader
     cache: Arc<DashMap<String, Arc<CachedCog>>>,
+    /// HTTP store cache: hostname → shared ObjectStore (reuses TCP connections)
+    stores: Arc<DashMap<String, Arc<dyn object_store::ObjectStore>>>,
     decoder: Arc<DecoderRegistry>,
 }
 
@@ -34,8 +37,24 @@ impl CogReader {
     pub fn new() -> Self {
         Self {
             cache: Arc::new(DashMap::new()),
+            stores: Arc::new(DashMap::new()),
             decoder: Arc::new(DecoderRegistry::default()),
         }
+    }
+
+    /// Return (or create) a shared ObjectStore for the given hostname base URL.
+    fn get_or_create_store(&self, base: &str) -> Result<Arc<dyn object_store::ObjectStore>> {
+        if let Some(store) = self.stores.get(base) {
+            return Ok(Arc::clone(&*store));
+        }
+        let store: Arc<dyn object_store::ObjectStore> = Arc::new(
+            HttpBuilder::new()
+                .with_url(base)
+                .build()
+                .context("creating HTTP object store")?,
+        );
+        self.stores.insert(base.to_string(), Arc::clone(&store));
+        Ok(store)
     }
 
     /// Open a COG URL, parsing IFDs and caching the result.
@@ -54,13 +73,7 @@ impl CogReader {
         );
         let obj_path = ObjPath::from(parsed.path().trim_start_matches('/'));
 
-        let store = Arc::new(
-            HttpBuilder::new()
-                .with_url(&base)
-                .build()
-                .context("creating HTTP object store")?,
-        );
-
+        let store = self.get_or_create_store(&base)?;
         let reader = ObjectReader::new(store, obj_path);
 
         // Wrap in ReadaheadMetadataCache for efficient IFD parsing
@@ -91,7 +104,8 @@ impl CogReader {
     ) -> Result<(Array2<u16>, Affine)> {
         let cog = self.open(url).await?;
         let ifd = select_overview(&cog.tiff, desired_gsd)?;
-        let affine = ifd_to_affine(ifd)?;
+        let affine = ifd_to_affine_with_fallback(ifd, cog.tiff.ifds())?;
+        let window_affine = window_origin_affine(&affine, window_utm, &ifd);
 
         let data = read_ifd_window(ifd, &cog.reader, &affine, window_utm, &self.decoder).await?;
 
@@ -100,7 +114,7 @@ impl CogReader {
         let flat = data.into_raw_vec();
         Ok((
             Array2::from_shape_vec((h, w), flat).context("reshaping band array")?,
-            affine,
+            window_affine,
         ))
     }
 
@@ -113,7 +127,8 @@ impl CogReader {
     ) -> Result<(Array2<u8>, Affine)> {
         let cog = self.open(url).await?;
         let ifd = select_overview(&cog.tiff, desired_gsd)?;
-        let affine = ifd_to_affine(ifd)?;
+        let affine = ifd_to_affine_with_fallback(ifd, cog.tiff.ifds())?;
+        let window_affine = window_origin_affine(&affine, window_utm, &ifd);
 
         let data = read_ifd_window(ifd, &cog.reader, &affine, window_utm, &self.decoder).await?;
 
@@ -123,8 +138,33 @@ impl CogReader {
         let flat: Vec<u8> = data.into_raw_vec().into_iter().map(|v| v as u8).collect();
         Ok((
             Array2::from_shape_vec((h, w), flat).context("reshaping SCL array")?,
-            affine,
+            window_affine,
         ))
+    }
+}
+
+// ─── Window-origin affine ────────────────────────────────────────────────────
+
+/// Compute an affine whose origin is the top-left corner of the requested
+/// window (not the full granule). The returned affine has the same pixel size
+/// as the granule affine but its origin_x/origin_y reflect the clamped
+/// col_min/row_min, so pixel index (0,0) corresponds to the window's NW corner.
+fn window_origin_affine(affine: &Affine, window_utm: &Bbox, ifd: &ImageFileDirectory) -> Affine {
+    let img_w = ifd.image_width() as f64;
+    let img_h = ifd.image_height() as f64;
+    let col_min = ((window_utm.x_min - affine.origin_x) / affine.pixel_width)
+        .floor()
+        .max(0.0)
+        .min(img_w);
+    let row_min = ((affine.origin_y - window_utm.y_max) / affine.pixel_height)
+        .floor()
+        .max(0.0)
+        .min(img_h);
+    Affine {
+        origin_x: affine.origin_x + col_min * affine.pixel_width,
+        origin_y: affine.origin_y - row_min * affine.pixel_height,
+        pixel_width: affine.pixel_width,
+        pixel_height: affine.pixel_height,
     }
 }
 
@@ -134,16 +174,26 @@ fn select_overview<'a>(tiff: &'a TIFF, desired_gsd: f64) -> Result<&'a ImageFile
     let ifds = tiff.ifds();
     anyhow::ensure!(!ifds.is_empty(), "TIFF has no IFDs");
 
+    let full_w = ifds[0].image_width() as f64;
     let full_gsd = ifd_pixel_size(&ifds[0])?;
     let mut best = &ifds[0];
     let mut best_gsd = full_gsd;
 
     for ifd in &ifds[1..] {
-        let gsd = match ifd_pixel_size(ifd) {
-            Ok(g) => g,
-            Err(_) => break,
+        // Try ModelPixelScale first; fall back to image-width ratio.
+        let gsd = if let Ok(g) = ifd_pixel_size(ifd) {
+            g
+        } else {
+            // Overview IFDs often lack ModelPixelScale; infer GSD from width ratio.
+            let ovr_w = ifd.image_width() as f64;
+            if ovr_w <= 0.0 {
+                break;
+            }
+            full_gsd * (full_w / ovr_w)
         };
-        if gsd <= desired_gsd {
+        // Allow up to 2× upsampling: select the coarsest overview within that range.
+        // This reduces HTTP fetch volume at low zoom levels without visible quality loss.
+        if gsd <= desired_gsd * 2.0 {
             best = ifd;
             best_gsd = gsd;
         } else {
@@ -174,6 +224,35 @@ pub fn ifd_to_affine(ifd: &ImageFileDirectory) -> Result<Affine> {
         origin_y: tp[4],
         pixel_width: scale[0].abs(),
         pixel_height: scale[1].abs(),
+    })
+}
+
+/// Like `ifd_to_affine` but falls back to the full-res (IFD[0]) tiepoint when
+/// the selected overview IFD lacks ModelTiepoint (common for overview IFDs).
+/// The overview pixel scale is inferred from the image-width ratio if ModelPixelScale is absent.
+fn ifd_to_affine_with_fallback(
+    ifd: &ImageFileDirectory,
+    all_ifds: &[ImageFileDirectory],
+) -> Result<Affine> {
+    // Prefer the IFD's own tiepoint + scale when available
+    if ifd.model_pixel_scale().is_some() && ifd.model_tiepoint().is_some() {
+        return ifd_to_affine(ifd);
+    }
+
+    // Fall back to full-res IFD[0] for tiepoint and origin
+    let full_ifd = all_ifds.first().context("TIFF has no IFDs")?;
+    let full_affine = ifd_to_affine(full_ifd)?;
+
+    // Infer pixel scale from image-width ratio
+    let full_w = full_ifd.image_width() as f64;
+    let ovr_w = ifd.image_width() as f64;
+    let scale_factor = if ovr_w > 0.0 { full_w / ovr_w } else { 1.0 };
+
+    Ok(Affine {
+        origin_x: full_affine.origin_x,
+        origin_y: full_affine.origin_y,
+        pixel_width: full_affine.pixel_width * scale_factor,
+        pixel_height: full_affine.pixel_height * scale_factor,
     })
 }
 

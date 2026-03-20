@@ -4,7 +4,10 @@ use crate::{
     cog::CogReader,
     composite::{apply_scl_mask, composite, SceneTile},
     config::S2Config,
-    geo::{webmercator_bbox_to_utm, warp_band_to_webmercator, warp_scl_to_webmercator, xyz_to_webmercator},
+    geo::{
+        precompute_wm_to_utm_grid, warp_band_with_grid, warp_scl_with_grid,
+        webmercator_bbox_to_utm, xyz_to_webmercator,
+    },
     index::{MosaicIndex, SceneRef},
 };
 use anyhow::Result;
@@ -139,16 +142,18 @@ async fn render_scene(
         }
     };
 
+    // Precompute WebMercator→UTM grid once for this scene (shared across SCL + all bands)
+    let utm_grid = precompute_wm_to_utm_grid(tile_bbox_wm, epsg, TILE_SIZE)?;
+
     // Warp SCL to 256×256 WebMercator
-    let scl_warped =
-        warp_scl_to_webmercator(&scl_array, &scl_affine, epsg, tile_bbox_wm, TILE_SIZE)?;
+    let scl_warped = warp_scl_with_grid(&scl_array, &scl_affine, &utm_grid, TILE_SIZE);
 
     // Collect band arrays and warp each to 256×256 WebMercator
     let mut band_arrays = Vec::with_capacity(bands_n);
     for (i, result) in band_results.into_iter().enumerate() {
         match result {
             Ok((arr, affine)) => {
-                let warped = warp_band_to_webmercator(&arr, &affine, epsg, tile_bbox_wm, TILE_SIZE)?;
+                let warped = warp_band_with_grid(&arr, &affine, &utm_grid, TILE_SIZE);
                 band_arrays.push(warped);
             }
             Err(e) => {
