@@ -54,6 +54,36 @@ Add as an XYZ layer in QGIS or any slippy map client:
 http://localhost:3000/{name}/{z}/{x}/{y}?format=png
 ```
 
+### CLI flags
+
+| Flag | Default | Description |
+|---|---|---|
+| `-c, --config` | `config.yaml` | Path to the YAML config file |
+| `--rebuild` | false | Force STAC re-search and index rebuild on startup |
+| `--host` | `0.0.0.0` | Bind address |
+| `--prefetch` | false | Pre-render all tiles into the cache, then exit |
+| `--tilesets` | all | Comma-separated tileset names to prefetch (e.g. `massachusetts,miami`) |
+| `--concurrency` | 8 | Max concurrent tile chunks during prefetch |
+| `--prefetch-format` | `png` | Image format written to cache during prefetch (`png`, `jpg`, `webp`) |
+| `--skip-cached` | false | Skip tiles already present in the cache (resume an interrupted prefetch) |
+
+### Pre-seeding the tile cache
+
+The `--prefetch` mode renders every tile in the configured extent and zoom range, writing results to the tile cache. Tiles are processed in 8×8 spatial chunks — one COG read per scene per band covers all 64 tiles in a chunk, rather than one read per tile, which dramatically reduces HTTP requests to S3.
+
+```bash
+# Pre-seed all tilesets
+./target/release/s2-tiler --config config.yaml --prefetch
+
+# Pre-seed a single tileset with higher concurrency
+./target/release/s2-tiler --config config.yaml --prefetch --tilesets massachusetts --concurrency 32
+
+# Resume an interrupted prefetch (skip tiles already written to cache)
+./target/release/s2-tiler --config config.yaml --prefetch --tilesets massachusetts --skip-cached
+```
+
+Progress is displayed as a live bar with tiles/s throughput and ETA. The process exits after prefetch completes; it does not start the HTTP server.
+
 ---
 
 ## Configuration
@@ -86,10 +116,26 @@ tilesets:
     season: [6, 7, 8]                           # months; omit for full year
     max_cloud_cover: 20                         # percent
     bands: [B04, B03, B02]                      # true color RGB
-    composite: best_pixel                       # best_pixel | median | latest
+    composite: best_pixel                       # best_pixel | median | latest | ndvi
     rescale: [0, 3000]                          # S2 L2A SR → [0, 255]
     max_scenes_per_tile: 12
+    haze_dn_max: 2400                           # optional; 0 = disabled
 ```
+
+### Tileset fields
+
+| Field | Required | Default | Description |
+|---|---|---|---|
+| `name` | yes | — | Tileset identifier; used as the URL prefix |
+| `extent` | yes | — | `[west, south, east, north]` in WGS84 |
+| `years` | yes | — | List of years to include, e.g. `[2023, 2024]` |
+| `season` | no | full year | Month numbers, e.g. `[6, 7, 8]` for June–August |
+| `max_cloud_cover` | no | 20 | Maximum scene cloud cover percent for STAC pre-filter |
+| `bands` | yes | — | S2 band codes; 1 (grayscale) or 3 (RGB), or 2 for NDVI |
+| `composite` | no | `best_pixel` | `best_pixel`, `latest`, `median`, or `ndvi` |
+| `rescale` | no | `[0, 3000]` | Input value range mapped to [0, 255] for display |
+| `max_scenes_per_tile` | no | 6 | Max scenes composited per tile (caps cold-tile latency) |
+| `haze_dn_max` | no | 0 (off) | Reject pixels where all bands exceed this DN value (thin haze/cloud). Typical values: 2400 for true-color `[0, 3000]`, 3200 for NIR `[0, 4000]` |
 
 ### Tile cache backends
 
@@ -236,6 +282,7 @@ config.yaml
             ▼
 main.rs  ──  STAC search (stac.rs)
          ──  build MosaicIndex (index.rs) → persisted to DuckDB (tilesets.db)
+         ──  [--prefetch] pre-seed tile cache (prefetch.rs), then exit
          ──  axum HTTP server (server.rs)
                 │
                 ├── /{name}/{z}/{x}/{y}
@@ -243,8 +290,9 @@ main.rs  ──  STAC search (stac.rs)
                 │       → index lookup (index.rs)
                 │       → parallel COG reads (cog.rs, async-tiff, object_store)
                 │       → reproject + warp to WebMercator (geo.rs, proj4rs)
-                │       → SCL masking + composite (composite.rs)
-                │       → rescale + PNG/JPEG encode (render.rs)
+                │       → SCL masking + haze rejection + composite (composite.rs)
+                │       → gap fill (BFS nearest-neighbour inpainting)
+                │       → rescale + PNG/JPEG/WebP encode (render.rs)
                 │       → tile cache write
                 │
                 └── POST /{name}/build
@@ -257,7 +305,7 @@ main.rs  ──  STAC search (stac.rs)
 
 **Warp** — per-scene, a 256×256 UTM→WebMercator coordinate grid is precomputed once, then reused for all band warps (bilinear) and the SCL warp (nearest-neighbour). This amortizes the proj4rs transform cost across bands.
 
-**Compositing** — `best_pixel` picks the lowest-cloud-cover valid pixel across scenes. Valid SCL classes: 4 (vegetation), 5 (bare soil), 6 (water), 7 (low-probability cloud). `median` is expensive for large extents.
+**Compositing** — `best_pixel` picks the lowest-cloud-cover valid pixel across scenes. Valid SCL classes: 4 (vegetation), 5 (bare soil), 6 (water), 7 (low-probability cloud). An optional `haze_dn_max` threshold rejects pixels where all bands exceed the value, catching thin haze that passes SCL validation. Remaining gaps after compositing are filled by BFS nearest-neighbour inpainting. `median` is expensive for large extents.
 
 ---
 
