@@ -9,6 +9,7 @@ use std::io::Cursor;
 pub enum OutputFormat {
     Png,
     Jpeg,
+    WebP,
 }
 
 impl OutputFormat {
@@ -16,6 +17,7 @@ impl OutputFormat {
         match s.to_lowercase().as_str() {
             "png" => Some(OutputFormat::Png),
             "jpg" | "jpeg" => Some(OutputFormat::Jpeg),
+            "webp" => Some(OutputFormat::WebP),
             _ => None,
         }
     }
@@ -24,6 +26,7 @@ impl OutputFormat {
         match self {
             OutputFormat::Png => "image/png",
             OutputFormat::Jpeg => "image/jpeg",
+            OutputFormat::WebP => "image/webp",
         }
     }
 
@@ -31,6 +34,7 @@ impl OutputFormat {
         match self {
             OutputFormat::Png => ImageFormat::Png,
             OutputFormat::Jpeg => ImageFormat::Jpeg,
+            OutputFormat::WebP => ImageFormat::WebP,
         }
     }
 }
@@ -69,8 +73,10 @@ pub fn encode_tile(
 
     for row in 0..size as usize {
         for col in 0..size as usize {
-            let valid = tile.mask[[row, col]];
-            let alpha = if valid { 255u8 } else { 0u8 };
+            // Unfilled pixels render as opaque black rather than transparent.
+            // Transparency is reserved for tiles with no data at all (Ok(None) path),
+            // which covers areas fully outside the tileset extent.
+            let alpha = 255u8;
 
             let (r, g, b) = if let Some(ndvi) = &tile.ndvi {
                 // NDVI: single f32 channel → grayscale

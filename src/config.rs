@@ -54,6 +54,12 @@ pub struct S2Config {
     #[serde(default = "default_max_scenes_per_tile")]
     pub max_scenes_per_tile: usize,
 
+    /// Haze rejection threshold: pixels where ALL bands exceed this DN value are
+    /// considered haze/thin-cloud and excluded from the composite (0 = disabled).
+    /// For true-color rescale [0, 3000]: ~2400. For NIR [0, 4000]: ~3200.
+    #[serde(default)]
+    pub haze_dn_max: u16,
+
     // ── Injected from AppConfig after parsing ────────────────────────────────
 
     #[serde(skip_deserializing)]

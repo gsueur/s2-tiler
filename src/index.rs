@@ -65,6 +65,30 @@ impl MosaicIndex {
         result
     }
 
+    /// Look up all unique scenes covering a WGS84 bbox, cloud-cover sorted.
+    pub fn scenes_for_bbox(&self, bbox: [f64; 4], max_scenes: usize) -> Vec<&SceneRef> {
+        use crate::geo::bbox_to_quadkeys;
+        let qks = bbox_to_quadkeys(bbox, self.quadkey_zoom);
+        let mut seen = std::collections::HashSet::new();
+        let mut result: Vec<&SceneRef> = Vec::new();
+        for qk in qks {
+            if let Some(indices) = self.index.get(&qk) {
+                for &idx in indices {
+                    if seen.insert(idx) {
+                        result.push(&self.scenes[idx]);
+                    }
+                }
+            }
+        }
+        result.sort_by(|a, b| {
+            a.cloud_cover
+                .partial_cmp(&b.cloud_cover)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        result.truncate(max_scenes);
+        result
+    }
+
     pub fn scene_count(&self) -> usize {
         self.scenes.len()
     }

@@ -32,7 +32,7 @@ proj4rs = "0.1"
 ndarray = "0.15"
 
 # Image encoding (PNG / JPEG) — pinned to 0.24.x for Rust 1.85 compatibility
-image = { version = "0.24", default-features = false, features = ["png", "jpeg"] }
+image = { version = "0.24", default-features = false, features = ["png", "jpeg", "webp"] }
 
 # Concurrent header cache
 dashmap = "6"
@@ -55,7 +55,16 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 duckdb = { version = "1", features = ["bundled"] }
 async-trait = "0.1"
 
+# Progress bar
+indicatif = "0.17"
+
 # Misc
 bytes = "1"
 url = "2"
 chrono = { version = "0.4", features = ["serde"] }
+
+[patch.crates-io]
+# Fix: unpredict_hdiff used chunk_width_pixels (valid count) as the row stride,
+# but GDAL/COG pads edge tiles to the full tile width before compression.
+# Wrong stride corrupted the H-predictor running sum → horizontal stripe artifacts.
+async-tiff = { git = "https://github.com/gsueur/async-tiff", branch = "fix/hdiff-edge-tile-stride" }

@@ -6,11 +6,26 @@ stac_url: https://earth-search.aws.element84.com/v1
 collection: sentinel-2-l2a
 index_path: tilesets.db
 
+tile_cache:
+  backend: local
+  path: ./cache
+
 tilesets:
   - name: massachusetts
+    haze_dn_max: 2400        # reject pixels where all bands > 2400 (thin haze / cloud)
     extent: [-73.6, 41.2, -69.8, 42.9]   # [west, south, east, north] WGS84
     years: [2023, 2024, 2025]
     season: [6, 7, 8]                     # June-July-August
+    max_cloud_cover: 20
+    bands: [B04, B03, B02]               # true color RGB
+    composite: best_pixel
+    rescale: [0, 3000]                    # S2 L2A SR range → [0, 255]
+    max_scenes_per_tile: 12
+  - name: miami 
+    haze_dn_max: 2400        # reject pixels where all bands > 2400 (thin haze / cloud)
+    extent: [-81, 25.5, -80, 26.5]   # [west, south, east, north] WGS84
+    years: [2023, 2024, 2025]
+    season: [4, 5, 6, 7, 8]                     # June-July-August
     max_cloud_cover: 20
     bands: [B04, B03, B02]               # true color RGB
     composite: best_pixel

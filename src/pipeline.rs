@@ -2,7 +2,7 @@
 /// Orchestrates: index lookup → parallel COG reads → warp → SCL mask → composite.
 use crate::{
     cog::CogReader,
-    composite::{apply_scl_mask, composite, SceneTile},
+    composite::{apply_scl_mask, composite, fill_gaps, SceneTile},
     config::S2Config,
     geo::{
         precompute_wm_to_utm_grid, warp_band_with_grid, warp_scl_with_grid,
@@ -13,7 +13,7 @@ use crate::{
 use anyhow::Result;
 use futures::future::join_all;
 use ndarray::Array3;
-use tracing::{debug, warn};
+use tracing::debug;
 
 pub const TILE_SIZE: u32 = 256;
 
@@ -32,7 +32,12 @@ pub async fn render_tile(
     // At tile zoom level z, tile width ≈ 40075km / 2^z
     let desired_gsd = tile_bbox_wm.width() / TILE_SIZE as f64;
 
-    let scenes = index.scenes_for_tile(z, x, y, config.max_scenes_per_tile);
+    // At low zoom, one tile spans multiple S2 orbital tracks. Scale the scene
+    // limit so we sample enough scenes to cover the full tile footprint.
+    // Each factor-of-2 zoom step halves the tile area; cap growth at 4× the config limit.
+    let zoom_scale = 1usize << (config.maxzoom.saturating_sub(z).min(2) as usize);
+    let effective_max = (config.max_scenes_per_tile * zoom_scale).min(config.max_scenes_per_tile * 4);
+    let scenes = index.scenes_for_tile(z, x, y, effective_max);
 
     if scenes.is_empty() {
         debug!("No scenes for tile {z}/{x}/{y}");
@@ -45,6 +50,7 @@ pub async fn render_tile(
     );
 
     // Process each scene concurrently
+    let scene_count = scenes.len();
     let futures: Vec<_> = scenes
         .into_iter()
         .map(|scene| {
@@ -53,12 +59,13 @@ pub async fn render_tile(
             let bands = config.bands.clone();
             let scene = scene.clone();
             let desired_gsd = desired_gsd;
+            let haze_dn_max = config.haze_dn_max;
             async move {
-                match render_scene(&scene, &tile_bbox_wm, &bands, desired_gsd, &cog_reader).await {
+                match render_scene(&scene, &tile_bbox_wm, &bands, desired_gsd, haze_dn_max, &cog_reader).await {
                     Ok(Some(t)) => Some(t),
                     Ok(None) => None,
                     Err(e) => {
-                        warn!("Scene {} failed: {e:#}", scene.id);
+                        debug!("Scene {} failed: {e:#}", scene.id);
                         None
                     }
                 }
@@ -73,10 +80,12 @@ pub async fn render_tile(
         .collect();
 
     if scene_tiles.is_empty() {
+        debug!("Tile {z}/{x}/{y}: all {scene_count} scenes failed or produced no valid pixels");
         return Ok(None);
     }
 
-    let result = composite(scene_tiles, &config.composite);
+    let mut result = composite(scene_tiles, &config.composite);
+    fill_gaps(&mut result);
     Ok(Some(result))
 }
 
@@ -86,6 +95,7 @@ async fn render_scene(
     tile_bbox_wm: &crate::geo::Bbox,
     band_codes: &[String],
     desired_gsd: f64,
+    haze_dn_max: u16,
     cog_reader: &CogReader,
 ) -> Result<Option<SceneTile>> {
     let epsg = scene.epsg;
@@ -137,56 +147,66 @@ async fn render_scene(
     let (scl_array, scl_affine) = match scl_result {
         Ok(r) => r,
         Err(e) => {
-            warn!("Failed to read SCL for scene {}: {e:#}", scene.id);
+            debug!("Failed to read SCL for scene {}: {e:#}", scene.id);
             return Ok(None);
         }
     };
 
-    // Precompute WebMercator→UTM grid once for this scene (shared across SCL + all bands)
-    let utm_grid = precompute_wm_to_utm_grid(tile_bbox_wm, epsg, TILE_SIZE)?;
+    // All I/O is done. Offload the CPU-heavy warp + mask work to the blocking thread pool
+    // so we don't starve tokio's async I/O polling on worker threads.
+    let tile_bbox_wm = *tile_bbox_wm;
+    let band_codes_owned: Vec<String> = band_codes.to_vec();
+    let scene_id = scene.id.clone();
 
-    // Warp SCL to 256×256 WebMercator
-    let scl_warped = warp_scl_with_grid(&scl_array, &scl_affine, &utm_grid, TILE_SIZE);
+    let scene_tile = tokio::task::spawn_blocking(move || -> anyhow::Result<Option<SceneTile>> {
+        // Precompute WebMercator→UTM grid once for this scene (shared across SCL + all bands)
+        let utm_grid = precompute_wm_to_utm_grid(&tile_bbox_wm, epsg, TILE_SIZE)?;
 
-    // Collect band arrays and warp each to 256×256 WebMercator
-    let mut band_arrays = Vec::with_capacity(bands_n);
-    for (i, result) in band_results.into_iter().enumerate() {
-        match result {
-            Ok((arr, affine)) => {
-                let warped = warp_band_with_grid(&arr, &affine, &utm_grid, TILE_SIZE);
-                band_arrays.push(warped);
-            }
-            Err(e) => {
-                warn!(
-                    "Failed to read band {} for scene {}: {e:#}",
-                    band_codes[i], scene.id
-                );
-                return Ok(None);
-            }
-        }
-    }
+        // Warp SCL to 256×256 WebMercator
+        let scl_warped = warp_scl_with_grid(&scl_array, &scl_affine, &utm_grid, TILE_SIZE);
 
-    if band_arrays.is_empty() {
-        return Ok(None);
-    }
-
-    // Assemble bands into Array3
-    let n = TILE_SIZE as usize;
-    let mut data = Array3::<u16>::zeros((bands_n, n, n));
-    for (b, band_arr) in band_arrays.iter().enumerate() {
-        for r in 0..n {
-            for c in 0..n {
-                data[[b, r, c]] = band_arr[[r, c]];
+        // Collect band arrays and warp each to 256×256 WebMercator
+        let mut band_arrays = Vec::with_capacity(bands_n);
+        for (i, result) in band_results.into_iter().enumerate() {
+            match result {
+                Ok((arr, affine)) => {
+                    let warped = warp_band_with_grid(&arr, &affine, &utm_grid, TILE_SIZE);
+                    band_arrays.push(warped);
+                }
+                Err(e) => {
+                    debug!(
+                        "Failed to read band {} for scene {scene_id}: {e:#}",
+                        band_codes_owned[i]
+                    );
+                    return Ok(None);
+                }
             }
         }
-    }
 
-    let scene_tile = apply_scl_mask(data, &scl_warped);
+        if band_arrays.is_empty() {
+            return Ok(None);
+        }
 
-    // If no valid pixels at all, skip this scene
-    if !scene_tile.mask.iter().any(|&v| v) {
-        return Ok(None);
-    }
+        // Assemble bands into Array3
+        let n = TILE_SIZE as usize;
+        let mut data = Array3::<u16>::zeros((bands_n, n, n));
+        for (b, band_arr) in band_arrays.iter().enumerate() {
+            for r in 0..n {
+                for c in 0..n {
+                    data[[b, r, c]] = band_arr[[r, c]];
+                }
+            }
+        }
 
-    Ok(Some(scene_tile))
+        let scene_tile = apply_scl_mask(data, &scl_warped, haze_dn_max);
+
+        if !scene_tile.mask.iter().any(|&v| v) {
+            return Ok(None);
+        }
+
+        Ok(Some(scene_tile))
+    })
+    .await??;
+
+    Ok(scene_tile)
 }

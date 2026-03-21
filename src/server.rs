@@ -98,7 +98,7 @@ async fn tile_handler(
     let format = match OutputFormat::from_str(&params.format) {
         Some(f) => f,
         None => {
-            return (StatusCode::BAD_REQUEST, "unsupported format; use png or jpg").into_response()
+            return (StatusCode::BAD_REQUEST, "unsupported format; use png, jpg, or webp").into_response()
         }
     };
 

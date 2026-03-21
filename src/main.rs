@@ -5,6 +5,7 @@ mod config;
 mod geo;
 mod index;
 mod pipeline;
+mod prefetch;
 mod render;
 mod server;
 mod stac;
@@ -14,6 +15,8 @@ use crate::{
     cog::CogReader,
     config::{AppConfig, S2Config, TileCacheConfig},
     index::{build_index, load_index, save_index, MosaicIndex},
+    prefetch::prefetch_tileset,
+    render::OutputFormat,
     server::{build_router, AppState, TilesetState},
     stac::search_items,
 };
@@ -22,6 +25,7 @@ use clap::Parser;
 use object_store::aws::AmazonS3Builder;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
+use indicatif::{MultiProgress, ProgressBar};
 use tracing::info;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
@@ -40,14 +44,36 @@ struct Cli {
     /// Bind address
     #[arg(long, default_value = "0.0.0.0")]
     host: String,
+
+    /// Pre-render all tiles into the cache then exit (skips serving)
+    #[arg(long, default_value_t = false)]
+    prefetch: bool,
+
+    /// Max concurrent tile renders during prefetch
+    #[arg(long, default_value_t = 8)]
+    concurrency: usize,
+
+    /// Output format for prefetched tiles (png, jpg, webp)
+    #[arg(long, default_value = "png")]
+    prefetch_format: String,
+
+    /// Skip tiles already present in the cache (useful for resuming an interrupted prefetch)
+    #[arg(long, default_value_t = false)]
+    skip_cached: bool,
+
+    /// Tilesets to prefetch (by name); defaults to all tilesets if omitted
+    #[arg(long, value_delimiter = ',')]
+    tilesets: Vec<String>,
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
     tracing_subscriber::registry()
         .with(fmt::layer())
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| "s2_tiler=info".into()))
         .init();
+
+    let multi = MultiProgress::new();
 
     let cli = Cli::parse();
     let app_config = AppConfig::from_yaml_file(&cli.config)?;
@@ -113,6 +139,45 @@ async fn main() -> Result<()> {
         index_db_path: app_config.index_path,
         tile_cache,
     });
+
+    if cli.prefetch {
+        let format = OutputFormat::from_str(&cli.prefetch_format)
+            .ok_or_else(|| anyhow::anyhow!("unsupported prefetch format: {}", cli.prefetch_format))?;
+
+        let mut names: Vec<&str> = if cli.tilesets.is_empty() {
+            state.tilesets.keys().map(String::as_str).collect()
+        } else {
+            for name in &cli.tilesets {
+                anyhow::ensure!(
+                    state.tilesets.contains_key(name.as_str()),
+                    "unknown tileset '{name}'; available: {}",
+                    state.tilesets.keys().cloned().collect::<Vec<_>>().join(", ")
+                );
+            }
+            cli.tilesets.iter().map(String::as_str).collect()
+        };
+        names.sort();
+
+        for name in names {
+            let ts = &state.tilesets[name];
+            let index = ts.index.read().await;
+            let pb = multi.add(ProgressBar::new(0));
+            prefetch_tileset(
+                &ts.config,
+                &index,
+                &state.cog_reader,
+                &state.tile_cache,
+                cli.concurrency,
+                format,
+                cli.skip_cached,
+                pb,
+            )
+            .await?;
+        }
+
+        info!("Prefetch complete.");
+        return Ok(());
+    }
 
     let addr = format!("{host}:{port}");
     info!("Listening on http://{addr}");

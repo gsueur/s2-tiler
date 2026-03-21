@@ -1,9 +1,7 @@
 /// Pixel compositing: SCL masking, best_pixel, median.
 use crate::config::Composite;
 use ndarray::{Array2, Array3};
-
-/// SCL classes considered valid (clear) pixels.
-const VALID_SCL: &[u8] = &[4, 5, 6, 7]; // vegetation, bare soil, water, low-cloud-prob
+use std::collections::VecDeque;
 
 /// Check if an SCL value is valid (not cloud/shadow/snow/nodata).
 #[inline]
@@ -42,10 +40,26 @@ impl SceneTile {
 }
 
 /// Apply SCL mask to a spectral tile, returning a `SceneTile`.
-pub fn apply_scl_mask(data: Array3<u16>, scl: &Array2<u8>) -> SceneTile {
+/// A pixel is valid if:
+///   1. Its SCL class is clear (not cloud/shadow/snow/nodata)
+///   2. All band values are non-zero (NODATA from bilinear boundary propagation)
+///   3. Not all bands exceed `haze_dn_max` (thin haze / unmasked cloud, 0 = disabled)
+pub fn apply_scl_mask(data: Array3<u16>, scl: &Array2<u8>, haze_dn_max: u16) -> SceneTile {
+    let bands = data.shape()[0];
     let h = data.shape()[1];
     let w = data.shape()[2];
-    let mask = Array2::from_shape_fn((h, w), |(r, c)| scl_is_valid(scl[[r, c]]));
+    let mask = Array2::from_shape_fn((h, w), |(r, c)| {
+        if !scl_is_valid(scl[[r, c]]) {
+            return false;
+        }
+        if (0..bands).any(|b| data[[b, r, c]] == 0) {
+            return false;
+        }
+        if haze_dn_max > 0 && (0..bands).all(|b| data[[b, r, c]] > haze_dn_max) {
+            return false;
+        }
+        true
+    });
     SceneTile { data, mask, ndvi: None }
 }
 
@@ -170,6 +184,51 @@ fn compute_ndvi(composited: SceneTile) -> SceneTile {
         data: Array3::zeros((1, size, size)), // unused when ndvi is Some
         mask: composited.mask,
         ndvi: Some(ndvi_arr),
+    }
+}
+
+/// Fill invalid pixels (mask=false) via BFS nearest-neighbor inpainting.
+///
+/// Seeds from all valid pixels and expands outward, so each gap pixel takes
+/// the value of its nearest valid source. Operates on both spectral and NDVI tiles.
+/// After this call every pixel has mask=true (assuming at least one seed exists).
+pub fn fill_gaps(tile: &mut SceneTile) {
+    if tile.mask.iter().all(|&v| v) {
+        return;
+    }
+
+    let size = tile.size();
+    let bands = tile.bands();
+    let mut queue: VecDeque<(usize, usize)> = VecDeque::new();
+
+    for r in 0..size {
+        for c in 0..size {
+            if tile.mask[[r, c]] {
+                queue.push_back((r, c));
+            }
+        }
+    }
+
+    while let Some((r, c)) = queue.pop_front() {
+        let neighbors = [
+            (r.wrapping_sub(1), c),
+            (r + 1, c),
+            (r, c.wrapping_sub(1)),
+            (r, c + 1),
+        ];
+        for (nr, nc) in neighbors {
+            if nr < size && nc < size && !tile.mask[[nr, nc]] {
+                if let Some(ndvi) = &mut tile.ndvi {
+                    ndvi[[nr, nc]] = ndvi[[r, c]];
+                } else {
+                    for b in 0..bands {
+                        tile.data[[b, nr, nc]] = tile.data[[b, r, c]];
+                    }
+                }
+                tile.mask[[nr, nc]] = true;
+                queue.push_back((nr, nc));
+            }
+        }
     }
 }
 

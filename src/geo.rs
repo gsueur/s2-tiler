@@ -46,15 +46,6 @@ pub fn webmercator_to_wgs84(mx: f64, my: f64) -> (f64, f64) {
 }
 
 /// WGS84 (degrees) → WebMercator (meters).
-pub fn wgs84_to_webmercator(lon: f64, lat: f64) -> (f64, f64) {
-    let mx = lon.to_radians() * WM_R;
-    let my = (lat.to_radians() / 2.0 + std::f64::consts::FRAC_PI_4)
-        .tan()
-        .ln()
-        * WM_R;
-    (mx, my)
-}
-
 // ─── UTM projections via proj4rs ────────────────────────────────────────────
 
 /// Build a proj4 string for a UTM zone given an EPSG code.
@@ -86,15 +77,6 @@ pub fn wgs84_to_utm(lon: f64, lat: f64, epsg: u32) -> Result<(f64, f64)> {
 }
 
 /// UTM (easting, northing) → WGS84 (degrees lon, lat) for the given EPSG.
-pub fn utm_to_wgs84(e: f64, n: f64, epsg: u32) -> Result<(f64, f64)> {
-    use proj4rs::{transform::transform, Proj};
-    let wgs84 = Proj::from_proj_string("+proj=longlat +datum=WGS84 +no_defs")?;
-    let utm = Proj::from_proj_string(&epsg_to_proj_string(epsg)?)?;
-    let mut pt = (e, n, 0.0_f64);
-    transform(&utm, &wgs84, &mut pt)?;
-    Ok((pt.0.to_degrees(), pt.1.to_degrees()))
-}
-
 /// Convert a WebMercator bbox to UTM (for the given EPSG code).
 pub fn webmercator_bbox_to_utm(bbox: &Bbox, epsg: u32) -> Result<Bbox> {
     // Transform all 4 corners and take the envelope
@@ -139,13 +121,6 @@ pub struct Affine {
 }
 
 impl Affine {
-    /// Pixel (col, row) center → CRS coordinates.
-    pub fn pixel_to_crs(&self, col: f64, row: f64) -> (f64, f64) {
-        let x = self.origin_x + (col + 0.5) * self.pixel_width;
-        let y = self.origin_y - (row + 0.5) * self.pixel_height;
-        (x, y)
-    }
-
     /// CRS coordinates → fractional pixel (col, row).
     pub fn crs_to_pixel(&self, x: f64, y: f64) -> (f64, f64) {
         let col = (x - self.origin_x) / self.pixel_width - 0.5;
@@ -159,7 +134,10 @@ impl Affine {
 use ndarray::Array2;
 
 /// Sample a single-band array at fractional (col, row) using bilinear interpolation.
-/// Returns 0 if out of bounds.
+/// Returns 0 if out of bounds or all 4 neighbors are NODATA (0).
+/// NODATA neighbors are excluded and weights are renormalized over the remaining valid
+/// neighbors — this avoids dark-fringe blending at scene boundaries while keeping
+/// edge pixels valid (no coverage gap at granule seams).
 pub fn bilinear_sample_u16(src: &Array2<u16>, col: f64, row: f64) -> u16 {
     let h = src.shape()[0];
     let w = src.shape()[1];
@@ -173,20 +151,36 @@ pub fn bilinear_sample_u16(src: &Array2<u16>, col: f64, row: f64) -> u16 {
     let r1 = (r0 + 1).min(h - 1);
     let c1 = (c0 + 1).min(w - 1);
 
+    let v00 = src[[r0, c0]];
+    let v01 = src[[r0, c1]];
+    let v10 = src[[r1, c0]];
+    let v11 = src[[r1, c1]];
+
     let dr = row - r0 as f64;
     let dc = col - c0 as f64;
 
-    let v00 = src[[r0, c0]] as f64;
-    let v01 = src[[r0, c1]] as f64;
-    let v10 = src[[r1, c0]] as f64;
-    let v11 = src[[r1, c1]] as f64;
+    // Renormalize bilinear weights to skip NODATA (0) neighbors.
+    // This avoids blending valid reflectance with out-of-footprint zeros (no dark fringe)
+    // while also not zeroing out valid edge pixels that happen to have a NODATA neighbor
+    // (no coverage gap at granule boundaries).
+    let weights = [
+        ((1.0 - dc) * (1.0 - dr), v00),
+        (dc * (1.0 - dr), v01),
+        ((1.0 - dc) * dr, v10),
+        (dc * dr, v11),
+    ];
+    let (total_w, weighted_sum) = weights
+        .iter()
+        .filter(|(_, v)| *v != 0)
+        .fold((0.0f64, 0.0f64), |(tw, ws), (w, v)| {
+            (tw + w, ws + w * *v as f64)
+        });
 
-    let v = v00 * (1.0 - dc) * (1.0 - dr)
-        + v01 * dc * (1.0 - dr)
-        + v10 * (1.0 - dc) * dr
-        + v11 * dc * dr;
+    if total_w == 0.0 {
+        return 0;
+    }
 
-    v.round() as u16
+    (weighted_sum / total_w).round() as u16
 }
 
 /// Nearest-neighbour sample for u8 SCL data.
@@ -283,34 +277,6 @@ pub fn warp_scl_with_grid(
 
 /// Warp a single-band u16 array from UTM (src_affine) to a WebMercator 256×256 grid.
 ///
-/// Convenience wrapper around `precompute_wm_to_utm_grid` + `warp_band_with_grid`.
-/// When warping multiple bands for the same scene, prefer calling those directly.
-pub fn warp_band_to_webmercator(
-    src: &Array2<u16>,
-    src_affine: &Affine,
-    epsg: u32,
-    tile_bbox: &Bbox,
-    output_size: u32,
-) -> Result<Array2<u16>> {
-    let grid = precompute_wm_to_utm_grid(tile_bbox, epsg, output_size)?;
-    Ok(warp_band_with_grid(src, src_affine, &grid, output_size))
-}
-
-/// Warp a u8 band (e.g. SCL) from UTM to WebMercator 256×256, using nearest-neighbour.
-///
-/// Convenience wrapper. When warping SCL + multiple bands for the same scene,
-/// use `precompute_wm_to_utm_grid` + `warp_scl_with_grid` instead.
-pub fn warp_scl_to_webmercator(
-    src: &Array2<u8>,
-    src_affine: &Affine,
-    epsg: u32,
-    tile_bbox: &Bbox,
-    output_size: u32,
-) -> Result<Array2<u8>> {
-    let grid = precompute_wm_to_utm_grid(tile_bbox, epsg, output_size)?;
-    Ok(warp_scl_with_grid(src, src_affine, &grid, output_size))
-}
-
 // ─── Quadkey index helpers ──────────────────────────────────────────────────
 
 /// Encode (x, y) tile at zoom z into a u64 quadkey.
