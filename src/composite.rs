@@ -15,8 +15,12 @@ pub fn scl_is_valid(scl: u8) -> bool {
 pub struct SceneTile {
     /// Spectral bands: shape (num_bands, 256, 256)
     pub data: Array3<u16>,
-    /// Valid pixel mask: shape (256, 256), true = pixel is valid (not cloud/nodata)
+    /// Valid pixel mask: shape (256, 256), true = pixel has a clear (SCL-valid) observation
     pub mask: Array2<bool>,
+    /// Scene footprint: shape (256, 256), true = at least one scene had any SCL data here
+    /// (regardless of SCL class). Used by fill_gaps to distinguish cloud holes (fill)
+    /// from no-coverage areas (leave transparent).
+    pub covered: Array2<bool>,
     /// NDVI values in [-1, 1] — set only when composite = ndvi; render uses this in place of data.
     pub ndvi: Option<Array2<f32>>,
 }
@@ -26,6 +30,7 @@ impl SceneTile {
         Self {
             data: Array3::zeros((bands, size, size)),
             mask: Array2::from_elem((size, size), false),
+            covered: Array2::from_elem((size, size), false),
             ndvi: None,
         }
     }
@@ -48,6 +53,9 @@ pub fn apply_scl_mask(data: Array3<u16>, scl: &Array2<u8>, haze_dn_max: u16) -> 
     let bands = data.shape()[0];
     let h = data.shape()[1];
     let w = data.shape()[2];
+    // covered: the scene has any SCL data here (not out-of-footprint).
+    // Includes cloud/shadow/snow pixels — anything the sensor saw.
+    let covered = Array2::from_shape_fn((h, w), |(r, c)| scl[[r, c]] != 0);
     let mask = Array2::from_shape_fn((h, w), |(r, c)| {
         if !scl_is_valid(scl[[r, c]]) {
             return false;
@@ -60,7 +68,7 @@ pub fn apply_scl_mask(data: Array3<u16>, scl: &Array2<u8>, haze_dn_max: u16) -> 
         }
         true
     });
-    SceneTile { data, mask, ndvi: None }
+    SceneTile { data, mask, covered, ndvi: None }
 }
 
 /// Composite multiple scene tiles using the configured strategy.
@@ -88,14 +96,15 @@ fn best_pixel(scenes: Vec<SceneTile>) -> SceneTile {
 
     let mut result_data = Array3::<u16>::zeros((bands, size, size));
     let mut result_mask = Array2::<bool>::from_elem((size, size), false);
+    let mut result_covered = Array2::<bool>::from_elem((size, size), false);
     let mut filled = 0usize;
 
     for scene in &scenes {
-        if filled == total {
-            break;
-        }
         for row in 0..size {
             for col in 0..size {
+                if scene.covered[[row, col]] {
+                    result_covered[[row, col]] = true;
+                }
                 if !result_mask[[row, col]] && scene.mask[[row, col]] {
                     for b in 0..bands {
                         result_data[[b, row, col]] = scene.data[[b, row, col]];
@@ -105,11 +114,15 @@ fn best_pixel(scenes: Vec<SceneTile>) -> SceneTile {
                 }
             }
         }
+        if filled == total {
+            break;
+        }
     }
 
     SceneTile {
         data: result_data,
         mask: result_mask,
+        covered: result_covered,
         ndvi: None,
     }
 }
@@ -147,9 +160,15 @@ fn median(scenes: Vec<SceneTile>) -> SceneTile {
         }
     }
 
+    // covered = union of all scene footprints
+    let result_covered = Array2::from_shape_fn((size, size), |(row, col)| {
+        scenes.iter().any(|s| s.covered[[row, col]])
+    });
+
     SceneTile {
         data: result_data,
         mask: result_mask,
+        covered: result_covered,
         ndvi: None,
     }
 }
@@ -193,59 +212,26 @@ fn compute_ndvi(composited: SceneTile) -> SceneTile {
     SceneTile {
         data: Array3::zeros((1, size, size)), // unused when ndvi is Some
         mask: composited.mask,
+        covered: composited.covered,
         ndvi: Some(ndvi_arr),
     }
 }
 
-/// Fill interior invalid pixels (mask=false) via BFS nearest-neighbor inpainting.
+/// Fill SCL-masked pixels (mask=false) via BFS nearest-neighbor inpainting.
 ///
-/// Only fills "interior" gaps — connected components of invalid pixels that do not
-/// touch the tile boundary. Exterior invalid regions (e.g. south edge of extent with
-/// no scene coverage) are left transparent so they don't appear as stretched rows.
+/// Only fills pixels within the scene footprint (`covered=true`) — these are pixels
+/// that at least one scene observed but all observations were cloud/shadow/snow.
+/// Pixels outside all scene footprints (`covered=false`) are left transparent.
+///
+/// This correctly handles:
+/// - Interior cloud holes in urban areas → filled (covered && !mask)
+/// - South/north edge of extent with no coverage → transparent (!covered)
+/// - Large cloud masses that touch the tile boundary in covered areas → filled
 pub fn fill_gaps(tile: &mut SceneTile) {
-    if tile.mask.iter().all(|&v| v) {
-        return;
-    }
-
     let size = tile.size();
     let bands = tile.bands();
 
-    // Step 1: Mark all invalid pixels reachable from the tile boundary as "exterior".
-    // These will not be filled — they represent no-coverage areas, not cloud holes.
-    let mut exterior = ndarray::Array2::<bool>::from_elem((size, size), false);
-    let mut bfs: VecDeque<(usize, usize)> = VecDeque::new();
-
-    let last = size - 1;
-    for c in 0..size {
-        if !tile.mask[[0, c]] && !exterior[[0, c]] {
-            exterior[[0, c]] = true;
-            bfs.push_back((0, c));
-        }
-        if !tile.mask[[last, c]] && !exterior[[last, c]] {
-            exterior[[last, c]] = true;
-            bfs.push_back((last, c));
-        }
-    }
-    for r in 1..last {
-        if !tile.mask[[r, 0]] && !exterior[[r, 0]] {
-            exterior[[r, 0]] = true;
-            bfs.push_back((r, 0));
-        }
-        if !tile.mask[[r, last]] && !exterior[[r, last]] {
-            exterior[[r, last]] = true;
-            bfs.push_back((r, last));
-        }
-    }
-    while let Some((r, c)) = bfs.pop_front() {
-        for (nr, nc) in [(r.wrapping_sub(1), c), (r + 1, c), (r, c.wrapping_sub(1)), (r, c + 1)] {
-            if nr < size && nc < size && !tile.mask[[nr, nc]] && !exterior[[nr, nc]] {
-                exterior[[nr, nc]] = true;
-                bfs.push_back((nr, nc));
-            }
-        }
-    }
-
-    // Step 2: BFS inpainting — fill only interior (non-exterior) invalid pixels.
+    // Seed BFS from all valid pixels.
     let mut queue: VecDeque<(usize, usize)> = VecDeque::new();
     for r in 0..size {
         for c in 0..size {
@@ -255,9 +241,14 @@ pub fn fill_gaps(tile: &mut SceneTile) {
         }
     }
 
+    if queue.is_empty() {
+        return; // No valid pixels at all — nothing to propagate from.
+    }
+
     while let Some((r, c)) = queue.pop_front() {
         for (nr, nc) in [(r.wrapping_sub(1), c), (r + 1, c), (r, c.wrapping_sub(1)), (r, c + 1)] {
-            if nr < size && nc < size && !tile.mask[[nr, nc]] && !exterior[[nr, nc]] {
+            // Only fill pixels that are (a) in-bounds, (b) not yet valid, (c) within a scene footprint.
+            if nr < size && nc < size && !tile.mask[[nr, nc]] && tile.covered[[nr, nc]] {
                 if let Some(ndvi) = &mut tile.ndvi {
                     ndvi[[nr, nc]] = ndvi[[r, c]];
                 } else {
@@ -279,7 +270,8 @@ mod tests {
     fn make_scene(val: u16, valid: bool, size: usize) -> SceneTile {
         let data = Array3::from_elem((3, size, size), val);
         let mask = Array2::from_elem((size, size), valid);
-        SceneTile { data, mask, ndvi: None }
+        let covered = Array2::from_elem((size, size), true);
+        SceneTile { data, mask, covered, ndvi: None }
     }
 
     #[test]
