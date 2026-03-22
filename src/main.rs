@@ -138,6 +138,9 @@ async fn main() -> Result<()> {
         port,
         index_db_path: app_config.index_path,
         tile_cache,
+        public_url: app_config.public_url,
+        cache_max_age: app_config.cache_max_age,
+        in_flight: Arc::new(dashmap::DashMap::new()),
     });
 
     if cli.prefetch {

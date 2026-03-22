@@ -147,6 +147,16 @@ pub struct AppConfig {
     #[serde(default)]
     pub tile_cache: TileCacheConfig,
 
+    /// Public base URL for TileJSON tile URLs (e.g. "https://tiles.example.com").
+    /// Defaults to "http://localhost:{port}" if not set.
+    #[serde(default)]
+    pub public_url: Option<String>,
+
+    /// Cache-Control max-age in seconds for tile responses.
+    /// Omit or set to None to suppress the Cache-Control header.
+    #[serde(default)]
+    pub cache_max_age: Option<u64>,
+
     pub tilesets: Vec<S2Config>,
 }
 

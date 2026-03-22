@@ -10,14 +10,16 @@ use crate::{
 };
 use axum::{
     extract::{Path, Query, State},
-    http::{header, StatusCode},
+    http::{HeaderValue, header, StatusCode},
     response::{IntoResponse, Json, Response},
     routing::{get, post},
     Router,
 };
+use bytes::Bytes;
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
-use tokio::sync::RwLock;
+use tokio::sync::{OnceCell, RwLock};
 use tracing::{error, info};
 
 // ─── State ──────────────────────────────────────────────────────────────────
@@ -34,6 +36,12 @@ pub struct AppState {
     pub port: u16,
     pub index_db_path: Option<String>,
     pub tile_cache: Arc<dyn TileCache>,
+    /// Optional public base URL for TileJSON (e.g. "https://tiles.example.com").
+    pub public_url: Option<String>,
+    /// Optional Cache-Control max-age in seconds for tile responses.
+    pub cache_max_age: Option<u64>,
+    /// Singleflight map: tile cache key → in-flight render result.
+    pub in_flight: Arc<DashMap<String, Arc<OnceCell<Option<Bytes>>>>>,
 }
 
 // ─── Router ──────────────────────────────────────────────────────────────────
@@ -80,6 +88,17 @@ async fn list_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 
 // ─── GET /{name}/{z}/{x}/{y} ─────────────────────────────────────────────────
 
+/// Build a tile response with correct Content-Type and optional Cache-Control header.
+fn tile_response(bytes: Bytes, format: OutputFormat, cache_max_age: Option<u64>) -> Response {
+    let mut resp = ([(header::CONTENT_TYPE, format.content_type())], bytes).into_response();
+    if let Some(max_age) = cache_max_age {
+        if let Ok(val) = HeaderValue::from_str(&format!("public, max-age={max_age}")) {
+            resp.headers_mut().insert(header::CACHE_CONTROL, val);
+        }
+    }
+    resp
+}
+
 async fn tile_handler(
     State(state): State<Arc<AppState>>,
     Path((name, z, x, y)): Path<(String, u8, u32, u32)>,
@@ -103,37 +122,63 @@ async fn tile_handler(
     };
 
     let cache_key = TileKey::new(&name, z, x, y, &params.format);
+
+    // Check the persistent tile cache first.
     if let Ok(Some(cached)) = state.tile_cache.get(&cache_key).await {
-        return (
-            [(header::CONTENT_TYPE, format.content_type())],
-            cached,
-        )
-            .into_response();
+        return tile_response(cached, format, state.cache_max_age);
     }
 
-    let index = ts.index.read().await;
-    let tile_result = render_tile(z, x, y, config, &index, &state.cog_reader).await;
+    // Singleflight: if a concurrent request is already rendering this tile,
+    // wait for its OnceCell to resolve rather than starting a duplicate render.
+    let flight_key = cache_key.to_path();
+    let cell = state
+        .in_flight
+        .entry(flight_key.clone())
+        .or_insert_with(|| Arc::new(OnceCell::new()))
+        .clone();
 
-    match tile_result {
-        Ok(Some(tile)) => match encode_tile(&tile, config.rescale, format) {
-            Ok(bytes) => {
-                let _ = state.tile_cache.put(&cache_key, bytes.clone()).await;
-                ([(header::CONTENT_TYPE, format.content_type())], bytes).into_response()
+    let config_clone = config.clone();
+    let cog_reader = state.cog_reader.clone();
+    let tile_cache = state.tile_cache.clone();
+    let cache_key_clone = cache_key.clone();
+    let name_clone = name.clone();
+
+    let index = ts.index.read().await;
+    let index_clone = Arc::clone(&*index);
+    drop(index);
+
+    let result: &Option<Bytes> = cell
+        .get_or_init(|| async move {
+            let tile_result =
+                render_tile(z, x, y, &config_clone, &index_clone, &cog_reader).await;
+
+            match tile_result {
+                Ok(Some(tile)) => match encode_tile(&tile, config_clone.rescale, format) {
+                    Ok(bytes) => {
+                        let _ = tile_cache.put(&cache_key_clone, bytes.clone()).await;
+                        Some(bytes)
+                    }
+                    Err(e) => {
+                        error!("Encode error for {name_clone}/{z}/{x}/{y}: {e:#}");
+                        None
+                    }
+                },
+                Ok(None) => None,
+                Err(e) => {
+                    error!("Render error for {name_clone}/{z}/{x}/{y}: {e:#}");
+                    None
+                }
             }
-            Err(e) => {
-                error!("Encode error for {name}/{z}/{x}/{y}: {e:#}");
-                (StatusCode::INTERNAL_SERVER_ERROR, "encode error").into_response()
-            }
-        },
-        Ok(None) => (
-            [(header::CONTENT_TYPE, "image/png")],
-            empty_tile_png(),
-        )
-            .into_response(),
-        Err(e) => {
-            error!("Render error for {name}/{z}/{x}/{y}: {e:#}");
-            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
-        }
+        })
+        .await;
+
+    // Clean up the in-flight entry. The cell value remains valid because
+    // all concurrent waiters have already received it via get_or_init.
+    state.in_flight.remove(&flight_key);
+
+    match result {
+        Some(bytes) => tile_response(bytes.clone(), format, state.cache_max_age),
+        None => ([(header::CONTENT_TYPE, "image/png")], empty_tile_png()).into_response(),
     }
 }
 
@@ -162,13 +207,16 @@ async fn tilejson_handler(
     let [west, south, east, north] = c.extent;
     let center_zoom = (c.minzoom + c.maxzoom) / 2;
 
+    let base = state
+        .public_url
+        .as_deref()
+        .map(|u| u.trim_end_matches('/').to_string())
+        .unwrap_or_else(|| format!("http://localhost:{}", state.port));
+
     Json(TileJson {
         tilejson: "2.2.0",
         name: name.clone(),
-        tiles: vec![format!(
-            "http://localhost:{}/{}/{{z}}/{{x}}/{{y}}?format=png",
-            state.port, name
-        )],
+        tiles: vec![format!("{base}/{}/{{z}}/{{x}}/{{y}}?format=png", name)],
         minzoom: c.minzoom,
         maxzoom: c.maxzoom,
         bounds: [west, south, east, north],
