@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>s2-tiler preview</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #111; color: #eee; display: flex; flex-direction: column; height: 100vh; }
+
+    #toolbar {
+      display: flex; align-items: center; gap: 12px;
+      padding: 8px 14px; background: #1e1e1e; border-bottom: 1px solid #333;
+      flex-shrink: 0;
+    }
+    #toolbar h1 { font-size: 14px; font-weight: 600; color: #aaa; letter-spacing: .05em; }
+    #tileset-tabs { display: flex; gap: 6px; }
+    .tab {
+      padding: 4px 12px; border-radius: 4px; border: 1px solid #444;
+      background: #2a2a2a; color: #ccc; cursor: pointer; font-size: 13px;
+      transition: background .15s;
+    }
+    .tab:hover { background: #333; }
+    .tab.active { background: #2563eb; border-color: #2563eb; color: #fff; }
+
+    #server-url-wrap { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+    #server-url-wrap label { font-size: 12px; color: #666; }
+    #server-url { background: #2a2a2a; border: 1px solid #444; color: #ccc; border-radius: 4px; padding: 3px 8px; font-size: 12px; width: 200px; }
+
+    #status { font-size: 12px; color: #888; white-space: nowrap; }
+    #status.ok  { color: #4ade80; }
+    #status.err { color: #f87171; }
+
+    #map { flex: 1; }
+
+    #info-panel {
+      position: absolute; bottom: 24px; left: 14px; z-index: 1000;
+      background: rgba(20,20,20,.85); backdrop-filter: blur(4px);
+      border: 1px solid #333; border-radius: 6px;
+      padding: 8px 12px; font-size: 12px; color: #bbb; min-width: 220px;
+      line-height: 1.8;
+    }
+    #info-panel strong { color: #eee; }
+  </style>
+</head>
+<body>
+
+<div id="toolbar">
+  <h1>s2-tiler</h1>
+  <div id="tileset-tabs"><!-- populated by JS --></div>
+  <div id="server-url-wrap">
+    <label for="server-url">Server</label>
+    <input id="server-url" type="text" value="http://localhost:3000">
+    <button class="tab" onclick="reload()">↺</button>
+  </div>
+  <span id="status">connecting…</span>
+</div>
+
+<div style="position:relative;flex:1;display:flex;flex-direction:column;">
+  <div id="map"></div>
+  <div id="info-panel">
+    <div>Tileset: <strong id="ip-name">—</strong></div>
+    <div>Zoom: <strong id="ip-zoom">—</strong></div>
+    <div>Scenes: <strong id="ip-scenes">—</strong></div>
+    <div>Tile: <strong id="ip-tile">—</strong></div>
+    <div>Coords: <strong id="ip-coords">—</strong></div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+  const BASE_LAYER = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+    attribution: '&copy; <a href="https://carto.com/">CARTO</a>',
+    subdomains: 'abcd', maxZoom: 20
+  });
+
+  const map = L.map('map', { layers: [BASE_LAYER], zoomControl: true }).setView([42.36, -71.06], 11);
+
+  // Track mouse position
+  map.on('mousemove', e => {
+    document.getElementById('ip-coords').textContent =
+      `${e.latlng.lat.toFixed(5)}, ${e.latlng.lng.toFixed(5)}`;
+    const z = map.getZoom();
+    const tx = Math.floor((e.latlng.lng + 180) / 360 * Math.pow(2, z));
+    const ty = Math.floor((1 - Math.log(Math.tan(e.latlng.lat * Math.PI / 180) + 1 / Math.cos(e.latlng.lat * Math.PI / 180)) / Math.PI) / 2 * Math.pow(2, z));
+    document.getElementById('ip-tile').textContent = `${z}/${tx}/${ty}`;
+  });
+  map.on('zoom', updateZoom);
+
+  function updateZoom() {
+    document.getElementById('ip-zoom').textContent = map.getZoom();
+  }
+  updateZoom();
+
+  let s2Layer = null;
+  let currentTileset = null;
+  let tilesets = [];
+
+  function serverUrl() {
+    return document.getElementById('server-url').value.replace(/\/$/, '');
+  }
+
+  async function loadTilesets() {
+    const base = serverUrl();
+    const statusEl = document.getElementById('status');
+    try {
+      const res = await fetch(`${base}/tilesets`);
+      if (!res.ok) throw new Error(res.statusText);
+      tilesets = await res.json(); // string[]
+      statusEl.textContent = `${tilesets.length} tileset(s) loaded`;
+      statusEl.className = 'ok';
+      renderTabs();
+      if (tilesets.length > 0) selectTileset(tilesets[0]);
+    } catch (e) {
+      statusEl.textContent = `Cannot reach ${base} — ${e.message}`;
+      statusEl.className = 'err';
+    }
+  }
+
+  function renderTabs() {
+    const wrap = document.getElementById('tileset-tabs');
+    wrap.innerHTML = '';
+    tilesets.forEach(name => {
+      const btn = document.createElement('button');
+      btn.className = 'tab' + (name === currentTileset ? ' active' : '');
+      btn.textContent = name;
+      btn.onclick = () => selectTileset(name);
+      wrap.appendChild(btn);
+    });
+  }
+
+  async function selectTileset(name) {
+    currentTileset = name;
+    renderTabs();
+
+    const base = serverUrl();
+
+    // Fetch info for sidebar
+    try {
+      const info = await fetch(`${base}/${name}/info`).then(r => r.json());
+      document.getElementById('ip-name').textContent = name;
+      document.getElementById('ip-scenes').textContent = info.scene_count ?? '—';
+    } catch (_) {}
+
+    // Fetch TileJSON for bounds + zoom range
+    let tj;
+    try {
+      tj = await fetch(`${base}/${name}/tilejson.json`).then(r => r.json());
+    } catch (e) {
+      console.warn('TileJSON failed', e);
+    }
+
+    // Remove existing S2 layer
+    if (s2Layer) { map.removeLayer(s2Layer); s2Layer = null; }
+
+    const tileUrl = `${base}/${name}/{z}/{x}/{y}?format=png`;
+    s2Layer = L.tileLayer(tileUrl, {
+      minZoom:     tj?.minzoom ?? 10,
+      maxZoom:     tj?.maxzoom ?? 15,
+      maxNativeZoom: tj?.maxzoom ?? 15,
+      opacity:     1,
+      tileSize:    256,
+      attribution: 'Sentinel-2 L2A / s2-tiler',
+      // Show tile load errors visually
+      errorTileUrl: 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'
+    });
+
+    s2Layer.on('tileerror', e => {
+      console.warn('Tile error', e.coords);
+    });
+
+    s2Layer.addTo(map);
+
+    // Fly to extent
+    if (tj?.bounds) {
+      const [w, s, e, n] = tj.bounds;
+      map.fitBounds([[s, w], [n, e]], { padding: [20, 20] });
+    }
+  }
+
+  function reload() {
+    loadTilesets();
+  }
+
+  // Also update zoom display on move
+  map.on('moveend', updateZoom);
+
+  // Initial load
+  loadTilesets();
+
+  // Reload if server URL changes (on Enter)
+  document.getElementById('server-url').addEventListener('keydown', e => {
+    if (e.key === 'Enter') reload();
+  });
+</script>
+</body>
+</html>
