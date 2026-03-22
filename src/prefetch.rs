@@ -11,7 +11,7 @@ use crate::{
     config::S2Config,
     geo::{
         precompute_wm_to_utm_grid, warp_band_with_grid, warp_scl_with_grid,
-        webmercator_bbox_to_utm, webmercator_to_wgs84, wgs84_to_tile, xyz_to_webmercator, Bbox,
+        webmercator_bbox_to_utm, webmercator_bbox_to_wgs84, wgs84_to_tile, xyz_to_webmercator, Bbox,
     },
     index::{MosaicIndex, SceneRef},
     pipeline::TILE_SIZE,
@@ -79,13 +79,6 @@ fn chunk_wm_bbox(z: u8, x_min: u32, y_min: u32, x_max: u32, y_max: u32) -> Bbox 
         x_max: br.x_max,
         y_max: tl.y_max,
     }
-}
-
-/// Convert a WebMercator bbox to a WGS84 bbox [west, south, east, north].
-fn wm_bbox_to_wgs84(bbox: &Bbox) -> [f64; 4] {
-    let (west, south) = webmercator_to_wgs84(bbox.x_min, bbox.y_min);
-    let (east, north) = webmercator_to_wgs84(bbox.x_max, bbox.y_max);
-    [west, south, east, north]
 }
 
 // ─── Chunk render ────────────────────────────────────────────────────────────
@@ -196,8 +189,8 @@ fn render_tiles_from_memory(
     loaded_scenes: Vec<LoadedScene>,
     config: Arc<S2Config>,
     format: OutputFormat,
-    format_str: &str,
 ) -> Vec<(TileKey, Bytes)> {
+    let format_str = format.as_ext();
     let n_bands = config.bands.len();
     let n = TILE_SIZE as usize;
     let mut results = Vec::new();
@@ -266,18 +259,14 @@ pub async fn prefetch_tileset(
     skip_cached: bool,
     pb: ProgressBar,
 ) -> Result<()> {
-    let format_str: &'static str = match format {
-        OutputFormat::Png => "png",
-        OutputFormat::Jpeg => "jpg",
-        OutputFormat::WebP => "webp",
-    };
+    let format_str = format.as_ext();
 
     // Count total tiles for the progress bar
     let total_tiles: usize = (config.minzoom..=config.maxzoom)
         .map(|z| tiles_for_zoom(config.extent, z).len())
         .sum();
 
-    let zoom_scale = 1usize << (config.maxzoom.saturating_sub(0).min(2) as usize);
+    let zoom_scale = 1usize << (config.maxzoom.saturating_sub(config.minzoom).min(2) as usize);
     let max_scenes = (config.max_scenes_per_tile * zoom_scale).min(config.max_scenes_per_tile * 4);
 
     pb.set_length(total_tiles as u64);
@@ -318,7 +307,7 @@ pub async fn prefetch_tileset(
 
             tokio::spawn(async move {
                 let chunk_wm = chunk_wm_bbox(z, x_min, y_min, x_max, y_max);
-                let wgs84 = wm_bbox_to_wgs84(&chunk_wm);
+                let wgs84 = webmercator_bbox_to_wgs84(&chunk_wm);
                 let scene_refs = index.scenes_for_bbox(wgs84, max_scenes);
 
                 // --- skip_cached check: if all tiles in the chunk are already cached, skip ---
@@ -367,7 +356,6 @@ pub async fn prefetch_tileset(
                         loaded_scenes,
                         config_blocking,
                         format,
-                        format_str,
                     )
                 })
                 .await

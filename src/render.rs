@@ -22,6 +22,14 @@ impl OutputFormat {
         }
     }
 
+    pub fn as_ext(&self) -> &'static str {
+        match self {
+            OutputFormat::Png => "png",
+            OutputFormat::Jpeg => "jpg",
+            OutputFormat::WebP => "webp",
+        }
+    }
+
     pub fn content_type(&self) -> &'static str {
         match self {
             OutputFormat::Png => "image/png",

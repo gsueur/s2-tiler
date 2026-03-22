@@ -45,6 +45,13 @@ pub fn webmercator_to_wgs84(mx: f64, my: f64) -> (f64, f64) {
     (lon, lat)
 }
 
+/// WebMercator bbox (meters) → WGS84 bbox [west, south, east, north] (degrees).
+pub fn webmercator_bbox_to_wgs84(bbox: &Bbox) -> [f64; 4] {
+    let (west, south) = webmercator_to_wgs84(bbox.x_min, bbox.y_min);
+    let (east, north) = webmercator_to_wgs84(bbox.x_max, bbox.y_max);
+    [west, south, east, north]
+}
+
 /// WGS84 (degrees) → WebMercator (meters).
 // ─── UTM projections via proj4rs ────────────────────────────────────────────
 
