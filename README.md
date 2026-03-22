@@ -1,6 +1,6 @@
 # s2-tiler
 
-Standalone async Sentinel-2 COG tile server. No GDAL, no Python.
+Standalone async Sentinel-2 COG tile server. 
 
 Searches Earth Search STAC for Sentinel-2 L2A scenes, builds a spatial index, and serves XYZ PNG/JPEG tiles via HTTP by reading Cloud-Optimized GeoTIFFs directly from S3. Multiple named tilesets are served from a single process, each with its own spatial extent, date range, and band configuration.
 
