@@ -137,14 +137,19 @@ impl TileCache for LocalCache {
 
 // ─── DuckDB ──────────────────────────────────────────────────────────────────
 
+/// DuckDB-backed tile cache with separate read and write connections.
+///
+/// Splitting connections reduces contention: concurrent read requests do not
+/// block behind an in-progress write, and writes do not queue behind reads.
 pub struct DuckDbCache {
-    conn: Arc<Mutex<duckdb::Connection>>,
+    read_conn: Arc<Mutex<duckdb::Connection>>,
+    write_conn: Arc<Mutex<duckdb::Connection>>,
 }
 
 impl DuckDbCache {
     pub fn new(path: &str) -> Result<Self> {
-        let conn = duckdb::Connection::open(path)?;
-        conn.execute_batch(
+        let write_conn = duckdb::Connection::open(path)?;
+        write_conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS tile_cache (
                 tileset TEXT     NOT NULL,
                 z       INTEGER  NOT NULL,
@@ -155,14 +160,19 @@ impl DuckDbCache {
                 PRIMARY KEY (tileset, z, x, y, format)
             );",
         )?;
-        Ok(Self { conn: Arc::new(Mutex::new(conn)) })
+        // Open a second connection for reads (DuckDB allows concurrent readers).
+        let read_conn = duckdb::Connection::open(path)?;
+        Ok(Self {
+            read_conn: Arc::new(Mutex::new(read_conn)),
+            write_conn: Arc::new(Mutex::new(write_conn)),
+        })
     }
 }
 
 #[async_trait]
 impl TileCache for DuckDbCache {
     async fn get(&self, key: &TileKey) -> Result<Option<Bytes>> {
-        let conn = self.conn.clone();
+        let conn = self.read_conn.clone();
         let key = key.clone();
         tokio::task::spawn_blocking(move || -> Result<Option<Bytes>> {
             let conn = conn.lock().map_err(|_| anyhow::anyhow!("mutex poisoned"))?;
@@ -187,7 +197,7 @@ impl TileCache for DuckDbCache {
     }
 
     async fn put(&self, key: &TileKey, data: Bytes) -> Result<()> {
-        let conn = self.conn.clone();
+        let conn = self.write_conn.clone();
         let key = key.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let conn = conn.lock().map_err(|_| anyhow::anyhow!("mutex poisoned"))?;
@@ -209,7 +219,7 @@ impl TileCache for DuckDbCache {
     }
 
     async fn clear_tileset(&self, tileset: &str) -> Result<()> {
-        let conn = self.conn.clone();
+        let conn = self.write_conn.clone();
         let tileset = tileset.to_string();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let conn = conn.lock().map_err(|_| anyhow::anyhow!("mutex poisoned"))?;

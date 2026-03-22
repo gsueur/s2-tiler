@@ -43,6 +43,9 @@ impl CogReader {
     }
 
     /// Return (or create) a shared ObjectStore for the given hostname base URL.
+    ///
+    /// Uses DashMap::entry to avoid the TOCTOU race where two concurrent callers
+    /// both miss the cache and each create a separate store (and TLS session).
     fn get_or_create_store(&self, base: &str) -> Result<Arc<dyn object_store::ObjectStore>> {
         if let Some(store) = self.stores.get(base) {
             return Ok(Arc::clone(&*store));
@@ -53,8 +56,13 @@ impl CogReader {
                 .build()
                 .context("creating HTTP object store")?,
         );
-        self.stores.insert(base.to_string(), Arc::clone(&store));
-        Ok(store)
+        // or_insert is atomic: if another thread raced us and already inserted,
+        // we get its value back and drop our newly created store.
+        Ok(Arc::clone(
+            &*self.stores
+                .entry(base.to_string())
+                .or_insert(store),
+        ))
     }
 
     /// Open a COG URL, parsing IFDs and caching the result.

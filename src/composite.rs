@@ -84,11 +84,16 @@ pub fn composite(scenes: Vec<SceneTile>, strategy: &Composite, n_bands: usize) -
 fn best_pixel(scenes: Vec<SceneTile>) -> SceneTile {
     let bands = scenes[0].bands();
     let size = scenes[0].size();
+    let total = size * size;
 
     let mut result_data = Array3::<u16>::zeros((bands, size, size));
     let mut result_mask = Array2::<bool>::from_elem((size, size), false);
+    let mut filled = 0usize;
 
     for scene in &scenes {
+        if filled == total {
+            break;
+        }
         for row in 0..size {
             for col in 0..size {
                 if !result_mask[[row, col]] && scene.mask[[row, col]] {
@@ -96,12 +101,9 @@ fn best_pixel(scenes: Vec<SceneTile>) -> SceneTile {
                         result_data[[b, row, col]] = scene.data[[b, row, col]];
                     }
                     result_mask[[row, col]] = true;
+                    filled += 1;
                 }
             }
-        }
-        // Early exit if all pixels are filled
-        if result_mask.iter().all(|&v| v) {
-            break;
         }
     }
 
@@ -116,23 +118,31 @@ fn best_pixel(scenes: Vec<SceneTile>) -> SceneTile {
 fn median(scenes: Vec<SceneTile>) -> SceneTile {
     let bands = scenes[0].bands();
     let size = scenes[0].size();
+    let n_scenes = scenes.len();
 
     let mut result_data = Array3::<u16>::zeros((bands, size, size));
     let mut result_mask = Array2::<bool>::from_elem((size, size), false);
+    // Reusable buffer: one alloc amortized across all (row, col, band) iterations.
+    let mut buf: Vec<u16> = Vec::with_capacity(n_scenes);
 
     for row in 0..size {
         for col in 0..size {
-            for b in 0..bands {
-                let valid_vals: Vec<u16> = scenes
-                    .iter()
-                    .filter(|s| s.mask[[row, col]])
-                    .map(|s| s.data[[b, row, col]])
-                    .collect();
+            // Skip pixels with no valid scene data.
+            let any_valid = scenes.iter().any(|s| s.mask[[row, col]]);
+            if !any_valid {
+                continue;
+            }
+            result_mask[[row, col]] = true;
 
-                if !valid_vals.is_empty() {
-                    result_mask[[row, col]] = true;
-                    result_data[[b, row, col]] = median_u16(&valid_vals);
-                }
+            for b in 0..bands {
+                buf.clear();
+                buf.extend(
+                    scenes
+                        .iter()
+                        .filter(|s| s.mask[[row, col]])
+                        .map(|s| s.data[[b, row, col]]),
+                );
+                result_data[[b, row, col]] = median_u16(&buf);
             }
         }
     }
