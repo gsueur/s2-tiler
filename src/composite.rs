@@ -197,11 +197,11 @@ fn compute_ndvi(composited: SceneTile) -> SceneTile {
     }
 }
 
-/// Fill invalid pixels (mask=false) via BFS nearest-neighbor inpainting.
+/// Fill interior invalid pixels (mask=false) via BFS nearest-neighbor inpainting.
 ///
-/// Seeds from all valid pixels and expands outward, so each gap pixel takes
-/// the value of its nearest valid source. Operates on both spectral and NDVI tiles.
-/// After this call every pixel has mask=true (assuming at least one seed exists).
+/// Only fills "interior" gaps — connected components of invalid pixels that do not
+/// touch the tile boundary. Exterior invalid regions (e.g. south edge of extent with
+/// no scene coverage) are left transparent so they don't appear as stretched rows.
 pub fn fill_gaps(tile: &mut SceneTile) {
     if tile.mask.iter().all(|&v| v) {
         return;
@@ -209,8 +209,44 @@ pub fn fill_gaps(tile: &mut SceneTile) {
 
     let size = tile.size();
     let bands = tile.bands();
-    let mut queue: VecDeque<(usize, usize)> = VecDeque::new();
 
+    // Step 1: Mark all invalid pixels reachable from the tile boundary as "exterior".
+    // These will not be filled — they represent no-coverage areas, not cloud holes.
+    let mut exterior = ndarray::Array2::<bool>::from_elem((size, size), false);
+    let mut bfs: VecDeque<(usize, usize)> = VecDeque::new();
+
+    let last = size - 1;
+    for c in 0..size {
+        if !tile.mask[[0, c]] && !exterior[[0, c]] {
+            exterior[[0, c]] = true;
+            bfs.push_back((0, c));
+        }
+        if !tile.mask[[last, c]] && !exterior[[last, c]] {
+            exterior[[last, c]] = true;
+            bfs.push_back((last, c));
+        }
+    }
+    for r in 1..last {
+        if !tile.mask[[r, 0]] && !exterior[[r, 0]] {
+            exterior[[r, 0]] = true;
+            bfs.push_back((r, 0));
+        }
+        if !tile.mask[[r, last]] && !exterior[[r, last]] {
+            exterior[[r, last]] = true;
+            bfs.push_back((r, last));
+        }
+    }
+    while let Some((r, c)) = bfs.pop_front() {
+        for (nr, nc) in [(r.wrapping_sub(1), c), (r + 1, c), (r, c.wrapping_sub(1)), (r, c + 1)] {
+            if nr < size && nc < size && !tile.mask[[nr, nc]] && !exterior[[nr, nc]] {
+                exterior[[nr, nc]] = true;
+                bfs.push_back((nr, nc));
+            }
+        }
+    }
+
+    // Step 2: BFS inpainting — fill only interior (non-exterior) invalid pixels.
+    let mut queue: VecDeque<(usize, usize)> = VecDeque::new();
     for r in 0..size {
         for c in 0..size {
             if tile.mask[[r, c]] {
@@ -220,14 +256,8 @@ pub fn fill_gaps(tile: &mut SceneTile) {
     }
 
     while let Some((r, c)) = queue.pop_front() {
-        let neighbors = [
-            (r.wrapping_sub(1), c),
-            (r + 1, c),
-            (r, c.wrapping_sub(1)),
-            (r, c + 1),
-        ];
-        for (nr, nc) in neighbors {
-            if nr < size && nc < size && !tile.mask[[nr, nc]] {
+        for (nr, nc) in [(r.wrapping_sub(1), c), (r + 1, c), (r, c.wrapping_sub(1)), (r, c + 1)] {
+            if nr < size && nc < size && !tile.mask[[nr, nc]] && !exterior[[nr, nc]] {
                 if let Some(ndvi) = &mut tile.ndvi {
                     ndvi[[nr, nc]] = ndvi[[r, c]];
                 } else {
