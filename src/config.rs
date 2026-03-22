@@ -259,18 +259,22 @@ impl S2Config {
         Ok(())
     }
 
-    /// Return RFC3339 datetime range strings for STAC search (one per year × season).
+    /// Return RFC3339 datetime range strings for STAC search (one per year × month).
+    ///
+    /// Produces one range per (year, month) pair rather than a single span from
+    /// min_month to max_month, so non-contiguous seasons like [3, 6, 9] are not
+    /// incorrectly expanded to include intermediate months.
     pub fn datetime_ranges(&self) -> Vec<String> {
         let mut ranges = Vec::new();
         for &year in &self.years {
             if let Some(months) = &self.season {
                 if !months.is_empty() {
-                    let min_m = months.iter().copied().min().unwrap();
-                    let max_m = months.iter().copied().max().unwrap();
-                    let end_day = days_in_month(year, max_m);
-                    ranges.push(format!(
-                        "{year}-{min_m:02}-01T00:00:00Z/{year}-{max_m:02}-{end_day:02}T23:59:59Z"
-                    ));
+                    for &month in months {
+                        let end_day = days_in_month(year, month);
+                        ranges.push(format!(
+                            "{year}-{month:02}-01T00:00:00Z/{year}-{month:02}-{end_day:02}T23:59:59Z"
+                        ));
+                    }
                 }
             } else {
                 ranges.push(format!("{year}-01-01T00:00:00Z/{year}-12-31T23:59:59Z"));

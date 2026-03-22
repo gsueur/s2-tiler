@@ -176,33 +176,34 @@ fn select_overview<'a>(tiff: &'a TIFF, desired_gsd: f64) -> Result<&'a ImageFile
 
     let full_w = ifds[0].image_width() as f64;
     let full_gsd = ifd_pixel_size(&ifds[0])?;
-    let mut best = &ifds[0];
+
+    // Iterate all IFDs (not just in order) and pick the coarsest one whose GSD
+    // is still within 2× of the desired GSD. Breaking early on the first IFD
+    // that exceeds the threshold is wrong when IFDs are not ordered fine→coarse.
+    let mut best_idx = 0usize;
     let mut best_gsd = full_gsd;
 
-    for ifd in &ifds[1..] {
-        // Try ModelPixelScale first; fall back to image-width ratio.
+    for (i, ifd) in ifds.iter().enumerate() {
         let gsd = if let Ok(g) = ifd_pixel_size(ifd) {
             g
         } else {
             // Overview IFDs often lack ModelPixelScale; infer GSD from width ratio.
             let ovr_w = ifd.image_width() as f64;
             if ovr_w <= 0.0 {
-                break;
+                continue;
             }
             full_gsd * (full_w / ovr_w)
         };
         // Allow up to 2× upsampling: select the coarsest overview within that range.
         // This reduces HTTP fetch volume at low zoom levels without visible quality loss.
-        if gsd <= desired_gsd * 2.0 {
-            best = ifd;
+        if gsd <= desired_gsd * 2.0 && gsd > best_gsd {
+            best_idx = i;
             best_gsd = gsd;
-        } else {
-            break;
         }
     }
 
     debug!("Selected overview GSD={best_gsd:.1}m (desired {desired_gsd:.1}m)");
-    Ok(best)
+    Ok(&ifds[best_idx])
 }
 
 fn ifd_pixel_size(ifd: &ImageFileDirectory) -> Result<f64> {

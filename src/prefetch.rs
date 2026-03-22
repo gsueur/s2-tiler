@@ -125,20 +125,14 @@ async fn fetch_chunk_scenes(
             y_max: utm_bbox.y_max + buf_y,
         };
 
-        // SCL read
-        let scl_result = {
+        // SCL and band reads concurrently
+        let scl_fut = {
             let url = scene.scl_url.clone();
             let reader = cog_reader.clone();
             let bbox = utm_buf;
             async move { reader.read_window_u8(&url, &bbox, scl_gsd).await }
-        }
-        .await;
-
-        let Ok((scl, scl_affine)) = scl_result else {
-            continue;
         };
 
-        // All band reads concurrently
         let band_futs: Vec<_> = config
             .bands
             .iter()
@@ -156,7 +150,12 @@ async fn fetch_chunk_scenes(
             })
             .collect();
 
-        let band_results = join_all(band_futs).await;
+        let (scl_result, band_results) = tokio::join!(scl_fut, join_all(band_futs));
+
+        let Ok((scl, scl_affine)) = scl_result else {
+            continue;
+        };
+
         let mut bands = Vec::with_capacity(config.bands.len());
         let mut all_ok = true;
         for r in band_results {
@@ -229,7 +228,7 @@ fn render_tiles_from_memory(
                 continue;
             }
 
-            let mut composited = composite(scene_tiles, &config.composite);
+            let mut composited = composite(scene_tiles, &config.composite, config.bands.len());
             fill_gaps(&mut composited);
 
             if let Ok(bytes) = encode_tile(&composited, config.rescale, format) {

@@ -84,7 +84,7 @@ pub async fn render_tile(
         return Ok(None);
     }
 
-    let mut result = composite(scene_tiles, &config.composite);
+    let mut result = composite(scene_tiles, &config.composite, config.bands.len());
     fill_gaps(&mut result);
     Ok(Some(result))
 }

@@ -118,21 +118,7 @@ pub fn build_index(items: &[StacItem], config: &S2Config) -> MosaicIndex {
             continue; // missing one or more bands
         }
 
-        let scene_idx = scenes.len();
-        scenes.push(SceneRef {
-            id: item.id.clone(),
-            band_urls,
-            scl_url,
-            cloud_cover: item.cloud_cover(),
-            datetime: item
-                .properties
-                .datetime
-                .clone()
-                .unwrap_or_default(),
-            epsg,
-        });
-
-        // Assign this scene to all quadkeys it intersects.
+        // Determine quadkeys before pushing to scenes — skip if no overlap.
         // Use the per-item WGS84 bbox from STAC, clipped to the config extent.
         let item_bbox = match item.bbox {
             Some(b) => b,
@@ -149,6 +135,23 @@ pub fn build_index(items: &[StacItem], config: &S2Config) -> MosaicIndex {
             continue; // item doesn't overlap config extent at all
         }
         let qks = bbox_to_quadkeys(clipped, qz);
+        if qks.is_empty() {
+            continue;
+        }
+
+        let scene_idx = scenes.len();
+        scenes.push(SceneRef {
+            id: item.id.clone(),
+            band_urls,
+            scl_url,
+            cloud_cover: item.cloud_cover(),
+            datetime: item
+                .properties
+                .datetime
+                .clone()
+                .unwrap_or_default(),
+            epsg,
+        });
         for qk in qks {
             index.entry(qk).or_default().push(scene_idx);
         }

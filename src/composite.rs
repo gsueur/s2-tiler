@@ -65,9 +65,9 @@ pub fn apply_scl_mask(data: Array3<u16>, scl: &Array2<u8>, haze_dn_max: u16) -> 
 
 /// Composite multiple scene tiles using the configured strategy.
 /// `scenes` must be ordered by cloud cover ascending for best_pixel / latest.
-pub fn composite(scenes: Vec<SceneTile>, strategy: &Composite) -> SceneTile {
+pub fn composite(scenes: Vec<SceneTile>, strategy: &Composite, n_bands: usize) -> SceneTile {
     if scenes.is_empty() {
-        return SceneTile::empty(3, 256);
+        return SceneTile::empty(n_bands, 256);
     }
 
     match strategy {
