@@ -81,10 +81,10 @@ pub fn encode_tile(
 
     for row in 0..size as usize {
         for col in 0..size as usize {
-            // Unfilled pixels render as opaque black rather than transparent.
-            // Transparency is reserved for tiles with no data at all (Ok(None) path),
-            // which covers areas fully outside the tileset extent.
-            let alpha = 255u8;
+            // Transparent where no valid (or filled) pixel exists.
+            // fill_gaps ensures covered cloud/shadow holes are filled before we reach here,
+            // so mask=false means genuinely no scene coverage at this pixel.
+            let alpha = if tile.mask[[row, col]] { 255u8 } else { 0u8 };
 
             let (r, g, b) = if let Some(ndvi) = &tile.ndvi {
                 // NDVI: single f32 channel → grayscale
