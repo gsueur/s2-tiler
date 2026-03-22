@@ -15,6 +15,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use tower_http::cors::CorsLayer;
 use bytes::Bytes;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -54,6 +55,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/{name}/config", get(config_handler))
         .route("/{name}/info", get(info_handler))
         .route("/{name}/build", post(build_handler))
+        .layer(CorsLayer::permissive())
         .with_state(state)
 }
 
