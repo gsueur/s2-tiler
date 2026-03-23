@@ -301,7 +301,15 @@ async fn read_ifd_window(
         .min(img_h as f64) as usize;
 
     if col_min >= col_max || row_min >= row_max {
-        // Window doesn't intersect the raster
+        // Requested window is outside this COG's spatial extent.
+        // Common for false-positive index hits: STAC bbox overlaps the tile's quadkey
+        // but the actual 100km S2 granule doesn't reach this tile.
+        debug!(
+            "Window outside COG extent: utm=({:.0},{:.0},{:.0},{:.0}) \
+             img={}×{} col={col_min}..{col_max} row={row_min}..{row_max}",
+            window_utm.x_min, window_utm.y_min, window_utm.x_max, window_utm.y_max,
+            img_w, img_h,
+        );
         return Ok(Array3::zeros((1, 1, 1)));
     }
 
