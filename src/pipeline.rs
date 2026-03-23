@@ -207,6 +207,11 @@ async fn render_scene(
         let scene_tile = apply_scl_mask(data, scl_warped.as_ref().map(|a| a as &_), haze_dn_max);
 
         if !scene_tile.mask.iter().any(|&v| v) {
+            let covered = scene_tile.covered.iter().filter(|&&v| v).count();
+            tracing::debug!(
+                "Scene {scene_id}: no valid pixels after masking \
+                 (covered={covered}/65536, scl_masking={scl_masking}, haze_dn_max={haze_dn_max})"
+            );
             return Ok(None);
         }
 
