@@ -38,10 +38,11 @@
       position: absolute; bottom: 24px; left: 14px; z-index: 1000;
       background: rgba(20,20,20,.85); backdrop-filter: blur(4px);
       border: 1px solid #333; border-radius: 6px;
-      padding: 8px 12px; font-size: 12px; color: #bbb; min-width: 220px;
+      padding: 8px 12px; font-size: 12px; color: #bbb; min-width: 240px;
       line-height: 1.8;
     }
     #info-panel strong { color: #eee; }
+    #info-panel hr { border: none; border-top: 1px solid #333; margin: 5px 0; }
   </style>
 </head>
 <body>
@@ -61,8 +62,14 @@
   <div id="map"></div>
   <div id="info-panel">
     <div>Tileset: <strong id="ip-name">—</strong></div>
-    <div>Zoom: <strong id="ip-zoom">—</strong></div>
     <div>Scenes: <strong id="ip-scenes">—</strong></div>
+    <div>Years: <strong id="ip-years">—</strong></div>
+    <div>Season: <strong id="ip-season">—</strong></div>
+    <div>Bands: <strong id="ip-bands">—</strong></div>
+    <div>Composite: <strong id="ip-composite">—</strong></div>
+    <div>Extent: <strong id="ip-extent">—</strong></div>
+    <hr>
+    <div>Zoom: <strong id="ip-zoom">—</strong></div>
     <div>Tile: <strong id="ip-tile">—</strong></div>
     <div>Coords: <strong id="ip-coords">—</strong></div>
   </div>
@@ -140,11 +147,25 @@
 
     const base = serverUrl();
 
-    // Fetch info for sidebar
+    const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+    // Fetch info + config for sidebar
     try {
-      const info = await fetch(`${base}/${name}/info`).then(r => r.json());
+      const [info, cfg] = await Promise.all([
+        fetch(`${base}/${name}/info`).then(r => r.json()),
+        fetch(`${base}/${name}/config`).then(r => r.json()),
+      ]);
       document.getElementById('ip-name').textContent = name;
       document.getElementById('ip-scenes').textContent = info.scene_count ?? '—';
+      document.getElementById('ip-years').textContent = cfg.years?.join(', ') ?? '—';
+      document.getElementById('ip-season').textContent = cfg.season?.length
+        ? cfg.season.map(m => MONTHS[m - 1]).join(', ')
+        : 'full year';
+      document.getElementById('ip-bands').textContent = cfg.bands?.join(', ') ?? '—';
+      document.getElementById('ip-composite').textContent = cfg.composite ?? '—';
+      const [w, s, e, n] = cfg.extent ?? [];
+      document.getElementById('ip-extent').textContent =
+        cfg.extent ? `${w}, ${s} → ${e}, ${n}` : '—';
     } catch (_) {}
 
     // Fetch TileJSON for bounds + zoom range
