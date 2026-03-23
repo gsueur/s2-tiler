@@ -26,9 +26,35 @@ On co-located AWS infrastructure (same region as the S3 bucket), cold tiles are 
 
 ## Build
 
+### Install Rust
+
+**macOS / Linux**
 ```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+```
+
+**Windows**
+
+Download and run [rustup-init.exe](https://win.rustup.rs/) from [rustup.rs](https://rustup.rs), or install via winget:
+```powershell
+winget install Rustlang.Rustup
+```
+
+Verify the installation:
+```bash
+rustc --version   # should be 1.85 or newer
+cargo --version
+```
+
+### Compile
+
+```bash
+git clone https://github.com/gsueur/s2-tiler.git
+cd s2-tiler
 cargo build --release
-# Binary: ./target/release/s2-tiler (~8MB, first build ~4–5min due to bundled DuckDB)
+# Binary: ./target/release/s2-tiler  (~8MB)
+# First build takes 4–5 minutes — DuckDB compiles from source
 ```
 
 ---
