@@ -176,10 +176,12 @@
 
     s2Layer.addTo(map);
 
-    // Fly to extent
+    // Fly to extent center at zoom 10 so tiles load immediately
     if (tj?.bounds) {
       const [w, s, e, n] = tj.bounds;
-      map.fitBounds([[s, w], [n, e]], { padding: [20, 20] });
+      const centerLat = (s + n) / 2;
+      const centerLng = (w + e) / 2;
+      map.setView([centerLat, centerLng], 10);
     }
   }
 
