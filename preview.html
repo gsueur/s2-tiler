@@ -97,6 +97,10 @@
   let currentTileset = null;
   let tilesets = [];
 
+  // Initialise server URL from ?server= query param, fall back to localhost
+  const defaultServer = new URL(location.href).searchParams.get('server') || 'http://localhost:3000';
+  document.getElementById('server-url').value = defaultServer;
+
   function serverUrl() {
     return document.getElementById('server-url').value.replace(/\/$/, '');
   }
