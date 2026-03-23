@@ -304,11 +304,15 @@ async fn read_ifd_window(
         // Requested window is outside this COG's spatial extent.
         // Common for false-positive index hits: STAC bbox overlaps the tile's quadkey
         // but the actual 100km S2 granule doesn't reach this tile.
+        let cog_x_min = affine.origin_x;
+        let cog_x_max = affine.origin_x + img_w as f64 * affine.pixel_width;
+        let cog_y_max = affine.origin_y;
+        let cog_y_min = affine.origin_y - img_h as f64 * affine.pixel_height;
         debug!(
-            "Window outside COG extent: utm=({:.0},{:.0},{:.0},{:.0}) \
-             img={}×{} col={col_min}..{col_max} row={row_min}..{row_max}",
+            "Window outside COG extent: \
+             cog=({cog_x_min:.0},{cog_y_min:.0},{cog_x_max:.0},{cog_y_max:.0}) \
+             req=({:.0},{:.0},{:.0},{:.0})",
             window_utm.x_min, window_utm.y_min, window_utm.x_max, window_utm.y_max,
-            img_w, img_h,
         );
         return Ok(Array3::zeros((1, 1, 1)));
     }
