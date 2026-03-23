@@ -1,3 +1,4 @@
 target/
 CLAUDE.md
 Cargo.lock
+config.yaml
