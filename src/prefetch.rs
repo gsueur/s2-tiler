@@ -87,8 +87,7 @@ fn chunk_wm_bbox(z: u8, x_min: u32, y_min: u32, x_max: u32, y_max: u32) -> Bbox 
 struct LoadedScene {
     /// One (array, affine) per spectral band — covers the full chunk extent.
     bands: Vec<(Array2<u16>, Affine)>,
-    scl: Array2<u8>,
-    scl_affine: Affine,
+    scl: Option<(Array2<u8>, Affine)>,
     epsg: u32,
 }
 
@@ -125,14 +124,6 @@ async fn fetch_chunk_scenes(
             y_max: utm_bbox.y_max + buf_y,
         };
 
-        // SCL and band reads concurrently
-        let scl_fut = {
-            let url = scene.scl_url.clone();
-            let reader = cog_reader.clone();
-            let bbox = utm_buf;
-            async move { reader.read_window_u8(&url, &bbox, scl_gsd).await }
-        };
-
         let band_futs: Vec<_> = config
             .bands
             .iter()
@@ -150,11 +141,19 @@ async fn fetch_chunk_scenes(
             })
             .collect();
 
-        let (scl_result, band_results) = tokio::join!(scl_fut, join_all(band_futs));
-
-        let Ok((scl, scl_affine)) = scl_result else {
-            continue;
+        let scl_opt = if config.scl_masking {
+            let url = scene.scl_url.clone().unwrap_or_default();
+            let reader = cog_reader.clone();
+            let bbox = utm_buf;
+            match reader.read_window_u8(&url, &bbox, scl_gsd).await {
+                Ok(result) => Some(result),
+                Err(_) => continue,
+            }
+        } else {
+            None
         };
+
+        let band_results = join_all(band_futs).await;
 
         let mut bands = Vec::with_capacity(config.bands.len());
         let mut all_ok = true;
@@ -171,7 +170,7 @@ async fn fetch_chunk_scenes(
             continue;
         }
 
-        loaded.push(LoadedScene { bands, scl, scl_affine, epsg });
+        loaded.push(LoadedScene { bands, scl: scl_opt, epsg });
     }
 
     loaded
@@ -205,8 +204,9 @@ fn render_tiles_from_memory(
                     continue;
                 };
 
-                let scl_warped =
-                    warp_scl_with_grid(&ls.scl, &ls.scl_affine, &utm_grid, TILE_SIZE);
+                let scl_warped = ls.scl.as_ref().map(|(scl_arr, scl_affine)| {
+                    warp_scl_with_grid(scl_arr, scl_affine, &utm_grid, TILE_SIZE)
+                });
 
                 let mut data = Array3::<u16>::zeros((n_bands, n, n));
                 for (b, (band_arr, band_affine)) in ls.bands.iter().enumerate() {
@@ -218,7 +218,7 @@ fn render_tiles_from_memory(
                     }
                 }
 
-                let scl_arg = if config.scl_masking { Some(&scl_warped) } else { None };
+                let scl_arg = scl_warped.as_ref().map(|a| a as &_);
                 let scene_tile = apply_scl_mask(data, scl_arg, config.haze_dn_max);
                 if scene_tile.mask.iter().any(|&v| v) {
                     scene_tiles.push(scene_tile);

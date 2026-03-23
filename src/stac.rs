@@ -102,8 +102,9 @@ pub async fn search_items(config: &S2Config, client: &reqwest::Client) -> Result
         .collect();
 
     all_items.retain(|item| {
+        let scl_ok = !config.scl_masking || item.scl_url().is_some();
         let ok = required_assets.iter().all(|asset| item.assets.contains_key(*asset))
-            && item.scl_url().is_some()
+            && scl_ok
             && item.epsg().is_some();
         if !ok {
             warn!("Skipping item {} (missing assets or proj:epsg)", item.id);

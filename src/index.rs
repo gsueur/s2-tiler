@@ -11,14 +11,16 @@ pub struct SceneRef {
     pub id: String,
     /// Band code → HTTPS URL for each spectral band
     pub band_urls: HashMap<String, String>,
-    /// SCL band URL (for cloud masking)
-    pub scl_url: String,
+    /// SCL band URL (for cloud masking); None when scl_masking is false
+    pub scl_url: Option<String>,
     /// Cloud cover percentage [0, 100]
     pub cloud_cover: f64,
     /// Scene datetime (ISO 8601)
     pub datetime: String,
     /// UTM EPSG code (e.g. 32631 for UTM31N)
     pub epsg: u32,
+    /// WGS84 bbox [west, south, east, north] from STAC item
+    pub bbox: [f64; 4],
 }
 
 /// Spatial index: quadkey (u64) → ordered list of scenes (cloud cover ascending).
@@ -33,22 +35,34 @@ pub struct MosaicIndex {
 
 impl MosaicIndex {
     /// Look up scenes covering tile (z, x, y), up to `max_scenes`.
+    ///
+    /// Scenes whose WGS84 bbox does not overlap the tile are filtered out before
+    /// truncation — this eliminates false-positive spatial index hits from
+    /// adjacent MGRS tiles that share a quadkey cell but don't reach the tile.
     pub fn scenes_for_tile(
         &self,
         z: u8,
         x: u32,
         y: u32,
         max_scenes: usize,
+        tile_wgs84: [f64; 4],
     ) -> Vec<&SceneRef> {
         let qks = tile_to_covering_quadkeys(z, x, y, self.quadkey_zoom);
         let mut seen = std::collections::HashSet::new();
         let mut result: Vec<&SceneRef> = Vec::new();
 
+        let [tw, ts, te, tn] = tile_wgs84;
+
         for qk in qks {
             if let Some(indices) = self.index.get(&qk) {
                 for &idx in indices {
                     if seen.insert(idx) {
-                        result.push(&self.scenes[idx]);
+                        let s = &self.scenes[idx];
+                        // Filter: scene bbox must overlap tile bbox
+                        let [sw, ss, se, sn] = s.bbox;
+                        if se > tw && sw < te && sn > ts && ss < tn {
+                            result.push(s);
+                        }
                     }
                 }
             }
@@ -110,8 +124,13 @@ pub fn build_index(items: &[StacItem], config: &S2Config) -> MosaicIndex {
         let Some(epsg) = item.epsg() else {
             continue;
         };
-        let Some(scl_url) = item.scl_url() else {
-            continue;
+        let scl_url = if config.scl_masking {
+            match item.scl_url() {
+                Some(u) => Some(u),
+                None => continue, // SCL required but missing — skip scene
+            }
+        } else {
+            None // scl_masking disabled: SCL URL not needed at render time
         };
         let band_urls = item.band_urls(&config.bands);
         if band_urls.len() != config.bands.len() {
@@ -145,12 +164,9 @@ pub fn build_index(items: &[StacItem], config: &S2Config) -> MosaicIndex {
             band_urls,
             scl_url,
             cloud_cover: item.cloud_cover(),
-            datetime: item
-                .properties
-                .datetime
-                .clone()
-                .unwrap_or_default(),
+            datetime: item.properties.datetime.clone().unwrap_or_default(),
             epsg,
+            bbox: item_bbox,
         });
         for qk in qks {
             index.entry(qk).or_default().push(scene_idx);
@@ -190,6 +206,10 @@ fn init_schema(conn: &duckdb::Connection) -> anyhow::Result<()> {
              epsg     INTEGER NOT NULL,
              scl_url  TEXT    NOT NULL,
              bands    TEXT    NOT NULL,
+             bbox_w   DOUBLE  NOT NULL DEFAULT 0,
+             bbox_s   DOUBLE  NOT NULL DEFAULT 0,
+             bbox_e   DOUBLE  NOT NULL DEFAULT 0,
+             bbox_n   DOUBLE  NOT NULL DEFAULT 0,
              PRIMARY KEY (tileset, idx)
          );
          CREATE TABLE IF NOT EXISTS scene_quadkeys (
@@ -230,8 +250,12 @@ pub fn save_index(index: &MosaicIndex, tileset: &str, path: &str) -> anyhow::Res
                 s.cloud_cover,
                 s.datetime.as_str(),
                 s.epsg as i32,
-                s.scl_url.as_str(),
-                bands.as_str()
+                s.scl_url.as_deref().unwrap_or(""),
+                bands.as_str(),
+                s.bbox[0],
+                s.bbox[1],
+                s.bbox[2],
+                s.bbox[3]
             ])?;
         }
         app.flush()?;
@@ -264,7 +288,8 @@ pub fn load_index(tileset: &str, path: &str) -> anyhow::Result<MosaicIndex> {
     };
 
     let mut stmt = conn.prepare(
-        "SELECT idx, id, cloud, dt, epsg, scl_url, bands
+        "SELECT idx, id, cloud, dt, epsg, scl_url, bands,
+                bbox_w, bbox_s, bbox_e, bbox_n
          FROM scenes WHERE tileset = ? ORDER BY idx",
     )?;
     let mut scenes: Vec<SceneRef> = Vec::new();
@@ -277,11 +302,17 @@ pub fn load_index(tileset: &str, path: &str) -> anyhow::Result<MosaicIndex> {
             row.get::<_, i32>(4)?,
             row.get::<_, String>(5)?,
             row.get::<_, String>(6)?,
+            row.get::<_, f64>(7)?,
+            row.get::<_, f64>(8)?,
+            row.get::<_, f64>(9)?,
+            row.get::<_, f64>(10)?,
         ))
     })?;
     for row in rows {
-        let (_, id, cloud_cover, datetime, epsg, scl_url, bands_json) = row?;
+        let (_, id, cloud_cover, datetime, epsg, scl_url_str, bands_json,
+             bbox_w, bbox_s, bbox_e, bbox_n) = row?;
         let band_urls = serde_json::from_str(&bands_json)?;
+        let scl_url: Option<String> = if scl_url_str.is_empty() { None } else { Some(scl_url_str) };
         scenes.push(SceneRef {
             id,
             cloud_cover,
@@ -289,6 +320,7 @@ pub fn load_index(tileset: &str, path: &str) -> anyhow::Result<MosaicIndex> {
             epsg: epsg as u32,
             scl_url,
             band_urls,
+            bbox: [bbox_w, bbox_s, bbox_e, bbox_n],
         });
     }
 

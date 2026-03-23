@@ -135,7 +135,8 @@ tilesets:
 | `composite` | no | `best_pixel` | `best_pixel`, `latest`, `median`, or `ndvi` |
 | `rescale` | no | `[0, 3000]` | Input value range mapped to [0, 255] for display |
 | `max_scenes_per_tile` | no | 6 | Max scenes composited per tile (caps cold-tile latency) |
-| `haze_dn_max` | no | 0 (off) | Reject pixels where all bands exceed this DN value (thin haze/cloud). Typical values: 2400 for true-color `[0, 3000]`, 3200 for NIR `[0, 4000]` |
+| `haze_dn_max` | no | 0 (off) | Reject pixels where all bands exceed this DN value (thin haze/cloud). Typical values: 2400 for true-color `[0, 3000]`, 3200 for NIR `[0, 4000]`. Only used when `scl_masking: true` |
+| `scl_masking` | no | `true` | When `true`, pixels are filtered by SCL class (4/5/6/7 valid) and `haze_dn_max`. When `false`, any non-zero pixel in the scene footprint is used as-is — avoids false masking of bright surfaces (urban, sand, snow) at the cost of no cloud filtering |
 
 ### Tile cache backends
 
@@ -299,13 +300,13 @@ main.rs  ──  STAC search (stac.rs)
                         re-search STAC → rebuild index → clear tile cache
 ```
 
-**Spatial index** — quadkey grid at `quadkey_zoom` (default 8). Each scene is indexed against its own STAC bbox, clipped to the tileset extent. Scenes are sorted by cloud cover ascending within each cell.
+**Spatial index** — quadkey grid at `quadkey_zoom` (default 8). Each scene is indexed against its own STAC bbox, clipped to the tileset extent. Scenes are sorted by cloud cover ascending within each cell. At render time, scenes whose STAC bbox does not overlap the requested tile's WGS84 footprint are skipped before any COG reads, eliminating false-positive hits from adjacent MGRS tiles that share a quadkey cell.
 
 **COG reading** — `async-tiff` reads IFDs and pixel windows directly from S3 over HTTP, with one shared `object_store` connection per hostname (avoids redundant TLS handshakes). IFDs are cached per URL for the server lifetime. Overview selection allows up to 2x upsampling to reduce fetched tile count at low zoom levels.
 
 **Warp** — per-scene, a 256×256 UTM→WebMercator coordinate grid is precomputed once, then reused for all band warps (bilinear) and the SCL warp (nearest-neighbour). This amortizes the proj4rs transform cost across bands.
 
-**Compositing** — `best_pixel` picks the lowest-cloud-cover valid pixel across scenes. Valid SCL classes: 4 (vegetation), 5 (bare soil), 6 (water), 7 (low-probability cloud). An optional `haze_dn_max` threshold rejects pixels where all bands exceed the value, catching thin haze that passes SCL validation. Remaining gaps after compositing are filled by BFS nearest-neighbour inpainting. `median` is expensive for large extents.
+**Compositing** — `best_pixel` picks the lowest-cloud-cover valid pixel across scenes. When `scl_masking: true` (default), valid SCL classes are 4 (vegetation), 5 (bare soil), 6 (water), 7 (low-probability cloud); an optional `haze_dn_max` threshold further rejects pixels where all bands exceed the value, catching thin haze that passes SCL validation. When `scl_masking: false`, any non-zero pixel is accepted without cloud filtering — suited for arid or urban areas where SCL misclassifies bright surfaces. Remaining gaps after compositing are filled by nearest-neighbour inpainting constrained to the scene footprint. `median` is expensive for large extents.
 
 ---
 

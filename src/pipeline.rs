@@ -6,7 +6,7 @@ use crate::{
     config::S2Config,
     geo::{
         precompute_wm_to_utm_grid, warp_band_with_grid, warp_scl_with_grid,
-        webmercator_bbox_to_utm, xyz_to_webmercator,
+        webmercator_bbox_to_utm, webmercator_bbox_to_wgs84, xyz_to_webmercator,
     },
     index::{MosaicIndex, SceneRef},
 };
@@ -37,7 +37,8 @@ pub async fn render_tile(
     // Each factor-of-2 zoom step halves the tile area; cap growth at 4× the config limit.
     let zoom_scale = 1usize << (config.maxzoom.saturating_sub(z).min(2) as usize);
     let effective_max = (config.max_scenes_per_tile * zoom_scale).min(config.max_scenes_per_tile * 4);
-    let scenes = index.scenes_for_tile(z, x, y, effective_max);
+    let tile_wgs84 = webmercator_bbox_to_wgs84(&tile_bbox_wm);
+    let scenes = index.scenes_for_tile(z, x, y, effective_max, tile_wgs84);
 
     if scenes.is_empty() {
         debug!("No scenes for tile {z}/{x}/{y}");
@@ -137,7 +138,7 @@ async fn render_scene(
 
     let (scl_opt, band_results) = if scl_masking {
         let scl_fut = {
-            let url = scene.scl_url.clone();
+            let url = scene.scl_url.clone().unwrap_or_default();
             let reader = cog_reader.clone();
             let bbox = utm_bbox_buf;
             let scl_gsd = desired_gsd.max(20.0);
@@ -208,10 +209,16 @@ async fn render_scene(
 
         if !scene_tile.mask.iter().any(|&v| v) {
             let covered = scene_tile.covered.iter().filter(|&&v| v).count();
-            tracing::debug!(
-                "Scene {scene_id}: no valid pixels after masking \
-                 (covered={covered}/65536, scl_masking={scl_masking}, haze_dn_max={haze_dn_max})"
-            );
+            if covered == 0 {
+                // Window outside granule — no data read (geometric false positive)
+                tracing::trace!("Scene {scene_id}: window outside granule extent, skipping");
+            } else {
+                // Data was present but all pixels masked (SCL/haze filtering)
+                tracing::debug!(
+                    "Scene {scene_id}: all pixels masked \
+                     (covered={covered}/65536, scl_masking={scl_masking}, haze_dn_max={haze_dn_max})"
+                );
+            }
             return Ok(None);
         }
 
