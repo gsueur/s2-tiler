@@ -32,6 +32,16 @@
     #status.ok  { color: #4ade80; }
     #status.err { color: #f87171; }
 
+    #progress-bar-wrap {
+      position: absolute; top: 0; left: 0; right: 0; height: 3px; z-index: 2000;
+      pointer-events: none;
+    }
+    #progress-bar {
+      height: 100%; width: 0%; background: #2563eb;
+      transition: width .15s ease, opacity .4s ease;
+      opacity: 0;
+    }
+
     #map { flex: 1; }
 
     #info-panel {
@@ -59,6 +69,7 @@
 </div>
 
 <div style="position:relative;flex:1;display:flex;flex-direction:column;">
+  <div id="progress-bar-wrap"><div id="progress-bar"></div></div>
   <div id="map"></div>
   <div id="info-panel">
     <div>Tileset: <strong id="ip-name">—</strong></div>
@@ -103,6 +114,31 @@
   let s2Layer = null;
   let currentTileset = null;
   let tilesets = [];
+
+  // Tile loading progress
+  let tilesLoading = 0;
+  let tilesTotal = 0;
+  const bar = document.getElementById('progress-bar');
+
+  function tileStart() {
+    if (tilesLoading === 0) {
+      tilesTotal = 0;
+      bar.style.opacity = '1';
+    }
+    tilesLoading++;
+    tilesTotal++;
+    bar.style.width = Math.min(tilesLoading / tilesTotal * 100, 95) + '%';
+  }
+
+  function tileEnd() {
+    tilesLoading = Math.max(0, tilesLoading - 1);
+    const pct = tilesTotal > 0 ? (1 - tilesLoading / tilesTotal) * 100 : 100;
+    bar.style.width = pct + '%';
+    if (tilesLoading === 0) {
+      bar.style.width = '100%';
+      setTimeout(() => { bar.style.opacity = '0'; bar.style.width = '0%'; }, 400);
+    }
+  }
 
   // Initialise server URL from ?server= query param, fall back to localhost
   const defaultServer = new URL(location.href).searchParams.get('server') || 'http://localhost:3000';
@@ -191,9 +227,9 @@
       errorTileUrl: 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'
     });
 
-    s2Layer.on('tileerror', e => {
-      console.warn('Tile error', e.coords);
-    });
+    s2Layer.on('tileloadstart', tileStart);
+    s2Layer.on('tileload', tileEnd);
+    s2Layer.on('tileerror', e => { tileEnd(); console.warn('Tile error', e.coords); });
 
     s2Layer.addTo(map);
 
