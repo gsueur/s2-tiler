@@ -60,8 +60,9 @@ pub async fn render_tile(
             let scene = scene.clone();
             let desired_gsd = desired_gsd;
             let haze_dn_max = config.haze_dn_max;
+            let scl_masking = config.scl_masking;
             async move {
-                match render_scene(&scene, &tile_bbox_wm, &bands, desired_gsd, haze_dn_max, &cog_reader).await {
+                match render_scene(&scene, &tile_bbox_wm, &bands, desired_gsd, haze_dn_max, scl_masking, &cog_reader).await {
                     Ok(Some(t)) => Some(t),
                     Ok(None) => None,
                     Err(e) => {
@@ -96,6 +97,7 @@ async fn render_scene(
     band_codes: &[String],
     desired_gsd: f64,
     haze_dn_max: u16,
+    scl_masking: bool,
     cog_reader: &CogReader,
 ) -> Result<Option<SceneTile>> {
     let epsg = scene.epsg;
@@ -113,17 +115,9 @@ async fn render_scene(
         y_max: utm_bbox.y_max + buf_y,
     };
 
-    // Read SCL + all spectral bands concurrently
+    // Read spectral bands (and optionally SCL) concurrently.
+    // SCL is skipped when scl_masking is false, saving one HTTP request per scene.
     let bands_n = band_codes.len();
-
-    let scl_fut = {
-        let url = scene.scl_url.clone();
-        let reader = cog_reader.clone();
-        let bbox = utm_bbox_buf;
-        // SCL is 20m resolution; we want a ~2× coarser read to keep it cheap
-        let scl_gsd = desired_gsd.max(20.0);
-        async move { reader.read_window_u8(&url, &bbox, scl_gsd).await }
-    };
 
     let band_futs: Vec<_> = band_codes
         .iter()
@@ -141,15 +135,25 @@ async fn render_scene(
         })
         .collect();
 
-    // Await SCL + bands simultaneously
-    let (scl_result, band_results) = tokio::join!(scl_fut, join_all(band_futs));
-
-    let (scl_array, scl_affine) = match scl_result {
-        Ok(r) => r,
-        Err(e) => {
-            debug!("Failed to read SCL for scene {}: {e:#}", scene.id);
-            return Ok(None);
-        }
+    let (scl_opt, band_results) = if scl_masking {
+        let scl_fut = {
+            let url = scene.scl_url.clone();
+            let reader = cog_reader.clone();
+            let bbox = utm_bbox_buf;
+            let scl_gsd = desired_gsd.max(20.0);
+            async move { reader.read_window_u8(&url, &bbox, scl_gsd).await }
+        };
+        let (scl_result, band_results) = tokio::join!(scl_fut, join_all(band_futs));
+        let scl = match scl_result {
+            Ok(r) => r,
+            Err(e) => {
+                debug!("Failed to read SCL for scene {}: {e:#}", scene.id);
+                return Ok(None);
+            }
+        };
+        (Some(scl), band_results)
+    } else {
+        (None, join_all(band_futs).await)
     };
 
     // All I/O is done. Offload the CPU-heavy warp + mask work to the blocking thread pool
@@ -162,8 +166,10 @@ async fn render_scene(
         // Precompute WebMercator→UTM grid once for this scene (shared across SCL + all bands)
         let utm_grid = precompute_wm_to_utm_grid(&tile_bbox_wm, epsg, TILE_SIZE)?;
 
-        // Warp SCL to 256×256 WebMercator
-        let scl_warped = warp_scl_with_grid(&scl_array, &scl_affine, &utm_grid, TILE_SIZE);
+        // Warp SCL if present
+        let scl_warped = scl_opt.map(|(arr, affine)| {
+            warp_scl_with_grid(&arr, &affine, &utm_grid, TILE_SIZE)
+        });
 
         // Collect band arrays and warp each to 256×256 WebMercator
         let mut band_arrays = Vec::with_capacity(bands_n);
@@ -198,7 +204,7 @@ async fn render_scene(
             }
         }
 
-        let scene_tile = apply_scl_mask(data, &scl_warped, haze_dn_max);
+        let scene_tile = apply_scl_mask(data, scl_warped.as_ref().map(|a| a as &_), haze_dn_max);
 
         if !scene_tile.mask.iter().any(|&v| v) {
             return Ok(None);

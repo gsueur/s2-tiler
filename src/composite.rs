@@ -44,31 +44,36 @@ impl SceneTile {
     }
 }
 
-/// Apply SCL mask to a spectral tile, returning a `SceneTile`.
-/// A pixel is valid if:
-///   1. Its SCL class is clear (not cloud/shadow/snow/nodata)
-///   2. All band values are non-zero (NODATA from bilinear boundary propagation)
-///   3. Not all bands exceed `haze_dn_max` (thin haze / unmasked cloud, 0 = disabled)
-pub fn apply_scl_mask(data: Array3<u16>, scl: &Array2<u8>, haze_dn_max: u16) -> SceneTile {
+/// Apply masking to a spectral tile, returning a `SceneTile`.
+///
+/// When `scl` is `Some`, pixels are filtered by SCL class (4/5/6/7 valid) and
+/// `haze_dn_max`. When `scl` is `None` (`scl_masking: false` in config), any pixel
+/// with at least one non-zero band is considered valid — scenes are used whole.
+pub fn apply_scl_mask(data: Array3<u16>, scl: Option<&Array2<u8>>, haze_dn_max: u16) -> SceneTile {
     let bands = data.shape()[0];
     let h = data.shape()[1];
     let w = data.shape()[2];
-    // covered: the scene has any SCL data here (not out-of-footprint).
-    // Includes cloud/shadow/snow pixels — anything the sensor saw.
-    let covered = Array2::from_shape_fn((h, w), |(r, c)| scl[[r, c]] != 0);
-    let mask = Array2::from_shape_fn((h, w), |(r, c)| {
-        if !scl_is_valid(scl[[r, c]]) {
-            return false;
+
+    match scl {
+        Some(scl) => {
+            let covered = Array2::from_shape_fn((h, w), |(r, c)| scl[[r, c]] != 0);
+            let mask = Array2::from_shape_fn((h, w), |(r, c)| {
+                if !scl_is_valid(scl[[r, c]]) { return false; }
+                if (0..bands).any(|b| data[[b, r, c]] == 0) { return false; }
+                if haze_dn_max > 0 && (0..bands).all(|b| data[[b, r, c]] > haze_dn_max) { return false; }
+                true
+            });
+            SceneTile { data, mask, covered, ndvi: None }
         }
-        if (0..bands).any(|b| data[[b, r, c]] == 0) {
-            return false;
+        None => {
+            // No SCL masking: any pixel with data is valid; footprint derived from bands.
+            let mask = Array2::from_shape_fn((h, w), |(r, c)| {
+                (0..bands).any(|b| data[[b, r, c]] != 0)
+            });
+            let covered = mask.clone();
+            SceneTile { data, mask, covered, ndvi: None }
         }
-        if haze_dn_max > 0 && (0..bands).all(|b| data[[b, r, c]] > haze_dn_max) {
-            return false;
-        }
-        true
-    });
-    SceneTile { data, mask, covered, ndvi: None }
+    }
 }
 
 /// Composite multiple scene tiles using the configured strategy.

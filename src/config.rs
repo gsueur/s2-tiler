@@ -57,8 +57,17 @@ pub struct S2Config {
     /// Haze rejection threshold: pixels where ALL bands exceed this DN value are
     /// considered haze/thin-cloud and excluded from the composite (0 = disabled).
     /// For true-color rescale [0, 3000]: ~2400. For NIR [0, 4000]: ~3200.
+    /// Ignored when scl_masking is false.
     #[serde(default)]
     pub haze_dn_max: u16,
+
+    /// When true (default), pixels are filtered by SCL class (only classes 4/5/6/7
+    /// are considered valid) and haze_dn_max. When false, any pixel within the scene
+    /// footprint is used as-is — scenes are composited whole, sorted by cloud cover.
+    /// Avoids false masking of bright urban surfaces, sand, or snow. SCL is not read
+    /// from S3 when this is false, saving one HTTP request per scene per tile.
+    #[serde(default = "default_scl_masking")]
+    pub scl_masking: bool,
 
     // ── Injected from AppConfig after parsing ────────────────────────────────
 
@@ -203,6 +212,9 @@ fn default_max_scenes_per_tile() -> usize {
 }
 fn default_port() -> u16 {
     3000
+}
+fn default_scl_masking() -> bool {
+    true
 }
 
 /// S2 band code → Earth Search v1 asset key

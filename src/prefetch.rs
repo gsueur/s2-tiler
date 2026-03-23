@@ -218,7 +218,8 @@ fn render_tiles_from_memory(
                     }
                 }
 
-                let scene_tile = apply_scl_mask(data, &scl_warped, config.haze_dn_max);
+                let scl_arg = if config.scl_masking { Some(&scl_warped) } else { None };
+                let scene_tile = apply_scl_mask(data, scl_arg, config.haze_dn_max);
                 if scene_tile.mask.iter().any(|&v| v) {
                     scene_tiles.push(scene_tile);
                 }
