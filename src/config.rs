@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -15,6 +16,20 @@ impl Default for Composite {
     fn default() -> Self {
         Composite::BestPixel
     }
+}
+
+/// A named visual preset: bands, rescale range, and composite strategy.
+/// Defined once at the AppConfig level and referenced by name in tilesets via `preset:`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompositePreset {
+    /// S2 band codes (e.g. ["B04", "B03", "B02"])
+    pub bands: Vec<String>,
+    /// Input value range mapped to [0, 255] for display
+    #[serde(default = "default_rescale")]
+    pub rescale: [f64; 2],
+    /// Compositing strategy
+    #[serde(default)]
+    pub composite: Composite,
 }
 
 /// Per-tileset configuration. Fields shared across all tilesets (minzoom, maxzoom,
@@ -39,7 +54,14 @@ pub struct S2Config {
     #[serde(default = "default_max_cloud_cover")]
     pub max_cloud_cover: f64,
 
-    /// S2 band codes to render (e.g. ["B04", "B03", "B02"] for RGB)
+    /// Named preset from the top-level `presets:` section.
+    /// When set, overrides `bands`, `rescale`, and `composite`.
+    #[serde(default)]
+    pub preset: Option<String>,
+
+    /// S2 band codes to render (e.g. ["B04", "B03", "B02"] for RGB).
+    /// Required if `preset` is not set.
+    #[serde(default)]
     pub bands: Vec<String>,
 
     /// Compositing strategy
@@ -173,6 +195,11 @@ pub struct AppConfig {
     #[serde(default)]
     pub cache_max_age: Option<u64>,
 
+    /// Named visual presets. Each preset defines bands, rescale, and composite strategy.
+    /// Tilesets reference a preset by name via the `preset:` field.
+    #[serde(default)]
+    pub presets: HashMap<String, CompositePreset>,
+
     pub tilesets: Vec<S2Config>,
 }
 
@@ -182,6 +209,18 @@ impl AppConfig {
         let mut config: AppConfig = serde_yaml::from_str(&content)?;
         anyhow::ensure!(!config.tilesets.is_empty(), "at least one tileset must be defined");
         for ts in &mut config.tilesets {
+            // Resolve preset before validation
+            if let Some(preset_name) = &ts.preset.clone() {
+                let preset = config.presets.get(preset_name).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "tileset '{}': unknown preset '{preset_name}'",
+                        ts.name
+                    )
+                })?;
+                ts.bands = preset.bands.clone();
+                ts.rescale = preset.rescale;
+                ts.composite = preset.composite.clone();
+            }
             ts.minzoom = config.minzoom;
             ts.maxzoom = config.maxzoom;
             ts.quadkey_zoom = config.quadkey_zoom;
@@ -263,7 +302,11 @@ impl S2Config {
     pub fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(!self.name.is_empty(), "tileset name must not be empty");
         anyhow::ensure!(!self.years.is_empty(), "years must not be empty");
-        anyhow::ensure!(!self.bands.is_empty(), "bands must not be empty");
+        anyhow::ensure!(
+            !self.bands.is_empty(),
+            "tileset '{}': bands must not be empty (set bands directly or via preset:)",
+            self.name
+        );
         match &self.composite {
             Composite::Ndvi => anyhow::ensure!(
                 self.bands.len() == 2,

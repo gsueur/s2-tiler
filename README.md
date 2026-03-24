@@ -114,7 +114,7 @@ Progress is displayed as a live bar with tiles/s throughput and ETA. The process
 
 ## Configuration
 
-All configuration lives in a single YAML file. Global settings apply to all tilesets; each tileset only needs its spatial and temporal parameters.
+All configuration lives in a single YAML file. Global settings apply to all tilesets; visual parameters (bands, rescale, composite strategy) are defined once as named presets and referenced by tilesets.
 
 ```yaml
 # ── Global ───────────────────────────────────────────────────────────────────
@@ -133,33 +133,52 @@ index_path: tilesets.db
 tile_cache:
   backend: memory   # none | memory | local | duckdb | s3 | r2
 
+# ── Visual presets ────────────────────────────────────────────────────────────
+# Define bands, rescale, and composite strategy once; reference by name in tilesets.
+
+presets:
+  truecolor:
+    bands: [B04, B03, B02]
+    rescale: [0, 3000]
+    composite: best_pixel
+  falsecolor:
+    bands: [B08, B04, B03]
+    rescale: [0, 4000]
+    composite: best_pixel
+
 # ── Tilesets ─────────────────────────────────────────────────────────────────
 
 tilesets:
   - name: massachusetts                         # used as URL prefix
+    preset: truecolor                           # references a preset defined above
     extent: [-73.6, 41.2, -69.8, 42.9]         # [west, south, east, north] WGS84
     years: [2023, 2024, 2025]
     season: [6, 7, 8]                           # months; omit for full year
     max_cloud_cover: 20                         # percent
-    bands: [B04, B03, B02]                      # true color RGB
-    composite: best_pixel                       # best_pixel | median | latest | ndvi
-    rescale: [0, 3000]                          # S2 L2A SR → [0, 255]
     max_scenes_per_tile: 12
     haze_dn_max: 2400                           # optional; 0 = disabled
 ```
+
+### Preset fields
+
+Presets are defined under the top-level `presets:` key and referenced in tilesets via `preset: <name>`.
+
+| Field | Required | Default | Description |
+|---|---|---|---|
+| `bands` | yes | — | S2 band codes; 1 (grayscale) or 3 (RGB), or 2 for NDVI |
+| `rescale` | no | `[0, 3000]` | Input value range mapped to [0, 255] for display |
+| `composite` | no | `best_pixel` | `best_pixel`, `latest`, `median`, or `ndvi` |
 
 ### Tileset fields
 
 | Field | Required | Default | Description |
 |---|---|---|---|
 | `name` | yes | — | Tileset identifier; used as the URL prefix |
+| `preset` | yes* | — | Named preset from the `presets:` section (*or set `bands` directly) |
 | `extent` | yes | — | `[west, south, east, north]` in WGS84 |
 | `years` | yes | — | List of years to include, e.g. `[2023, 2024]` |
 | `season` | no | full year | Month numbers, e.g. `[6, 7, 8]` for June–August |
 | `max_cloud_cover` | no | 20 | Maximum scene cloud cover percent for STAC pre-filter |
-| `bands` | yes | — | S2 band codes; 1 (grayscale) or 3 (RGB), or 2 for NDVI |
-| `composite` | no | `best_pixel` | `best_pixel`, `latest`, `median`, or `ndvi` |
-| `rescale` | no | `[0, 3000]` | Input value range mapped to [0, 255] for display |
 | `max_scenes_per_tile` | no | 6 | Max scenes composited per tile (caps cold-tile latency) |
 | `haze_dn_max` | no | 0 (off) | Reject pixels where all bands exceed this DN value (thin haze/cloud). Typical values: 2400 for true-color `[0, 3000]`, 3200 for NIR `[0, 4000]`. Only used when `scl_masking: true` |
 | `scl_masking` | no | `true` | When `true`, pixels are filtered by SCL class (4/5/6/7 valid) and `haze_dn_max`. When `false`, any non-zero pixel in the scene footprint is used as-is — avoids false masking of bright surfaces (urban, sand, snow) at the cost of no cloud filtering |
@@ -265,25 +284,31 @@ tile_cache:
   bucket: my-tiles
   account_id: abc123def456
 
+presets:
+  truecolor:
+    bands: [B04, B03, B02]
+    rescale: [0, 3000]
+    composite: best_pixel
+  falsecolor:
+    bands: [B08, B04, B03]
+    rescale: [0, 4000]
+    composite: best_pixel
+
 tilesets:
   - name: massachusetts
+    preset: truecolor
     extent: [-73.6, 41.2, -69.8, 42.9]
     years: [2023, 2024, 2025]
     season: [6, 7, 8]
     max_cloud_cover: 20
-    bands: [B04, B03, B02]
-    composite: best_pixel
-    rescale: [0, 3000]
     max_scenes_per_tile: 12
 
   - name: california-falsecolor
+    preset: falsecolor
     extent: [-124.5, 32.5, -114.1, 42.1]
     years: [2024]
     season: [7, 8, 9]
     max_cloud_cover: 15
-    bands: [B08, B04, B03]
-    composite: best_pixel
-    rescale: [0, 4000]
     max_scenes_per_tile: 8
 ```
 
