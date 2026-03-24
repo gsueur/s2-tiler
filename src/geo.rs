@@ -136,58 +136,76 @@ impl Affine {
     }
 }
 
-// ─── Bilinear resampling ────────────────────────────────────────────────────
+// ─── Resampling ─────────────────────────────────────────────────────────────
 
 use ndarray::Array2;
 
-/// Sample a single-band array at fractional (col, row) using bilinear interpolation.
-/// Returns 0 if out of bounds or all 4 neighbors are NODATA (0).
-/// NODATA neighbors are excluded and weights are renormalized over the remaining valid
-/// neighbors — this avoids dark-fringe blending at scene boundaries while keeping
-/// edge pixels valid (no coverage gap at granule seams).
-pub fn bilinear_sample_u16(src: &Array2<u16>, col: f64, row: f64) -> u16 {
+
+/// Nearest-neighbour sample for u16 band data.
+pub fn nn_sample_u16(src: &Array2<u16>, col: f64, row: f64) -> u16 {
     let h = src.shape()[0];
     let w = src.shape()[1];
+    let r = row.round() as usize;
+    let c = col.round() as usize;
+    if r < h && c < w { src[[r, c]] } else { 0 }
+}
 
-    if col < 0.0 || row < 0.0 || col >= (w as f64) || row >= (h as f64) {
+/// Bicubic sample for u16 band data using Keys' cubic kernel (a = -0.5).
+///
+/// Uses a 4×4 neighborhood. NODATA (0) neighbors are excluded and weights are
+/// renormalized — same boundary handling as bilinear to avoid dark fringes.
+pub fn bicubic_sample_u16(src: &Array2<u16>, col: f64, row: f64) -> u16 {
+    let h = src.shape()[0] as isize;
+    let w = src.shape()[1] as isize;
+
+    if col < 0.0 || row < 0.0 || col >= w as f64 || row >= h as f64 {
         return 0;
     }
 
-    let r0 = row.floor() as usize;
-    let c0 = col.floor() as usize;
-    let r1 = (r0 + 1).min(h - 1);
-    let c1 = (c0 + 1).min(w - 1);
+    #[inline]
+    fn cubic_weight(t: f64) -> f64 {
+        const A: f64 = -0.5;
+        let t = t.abs();
+        if t <= 1.0 {
+            (A + 2.0) * t * t * t - (A + 3.0) * t * t + 1.0
+        } else if t < 2.0 {
+            A * t * t * t - 5.0 * A * t * t + 8.0 * A * t - 4.0 * A
+        } else {
+            0.0
+        }
+    }
 
-    let v00 = src[[r0, c0]];
-    let v01 = src[[r0, c1]];
-    let v10 = src[[r1, c0]];
-    let v11 = src[[r1, c1]];
+    let c0 = col.floor() as isize;
+    let r0 = row.floor() as isize;
+    let dc = col - col.floor();
+    let dr = row - row.floor();
 
-    let dr = row - r0 as f64;
-    let dc = col - c0 as f64;
+    let mut total_w = 0.0f64;
+    let mut weighted_sum = 0.0f64;
 
-    // Renormalize bilinear weights to skip NODATA (0) neighbors.
-    // This avoids blending valid reflectance with out-of-footprint zeros (no dark fringe)
-    // while also not zeroing out valid edge pixels that happen to have a NODATA neighbor
-    // (no coverage gap at granule boundaries).
-    let weights = [
-        ((1.0 - dc) * (1.0 - dr), v00),
-        (dc * (1.0 - dr), v01),
-        ((1.0 - dc) * dr, v10),
-        (dc * dr, v11),
-    ];
-    let (total_w, weighted_sum) = weights
-        .iter()
-        .filter(|(_, v)| *v != 0)
-        .fold((0.0f64, 0.0f64), |(tw, ws), (w, v)| {
-            (tw + w, ws + w * *v as f64)
-        });
+    for dy in -1isize..=2 {
+        let wy = cubic_weight(dy as f64 - dr);
+        for dx in -1isize..=2 {
+            let wx = cubic_weight(dx as f64 - dc);
+            let r = r0 + dy;
+            let c = c0 + dx;
+            if r < 0 || r >= h || c < 0 || c >= w {
+                continue;
+            }
+            let v = src[[r as usize, c as usize]];
+            if v == 0 {
+                continue; // skip NODATA
+            }
+            let w = wx * wy;
+            total_w += w;
+            weighted_sum += w * v as f64;
+        }
+    }
 
     if total_w == 0.0 {
         return 0;
     }
-
-    (weighted_sum / total_w).round() as u16
+    (weighted_sum / total_w).round().clamp(0.0, 65535.0) as u16
 }
 
 /// Nearest-neighbour sample for u8 SCL data.
@@ -239,14 +257,21 @@ pub fn precompute_wm_to_utm_grid(
 }
 
 /// Warp a u16 band using a precomputed UTM grid (from `precompute_wm_to_utm_grid`).
+///
+/// Resampler is selected automatically based on the scale ratio (src GSD / output GSD):
+/// - Upsampling ratio > 1.5× → nearest-neighbour (preserves crisp source pixels)
+/// - Otherwise              → bicubic (Keys' cubic, sharper than bilinear)
 pub fn warp_band_with_grid(
     src: &Array2<u16>,
     src_affine: &Affine,
     grid: &[(f64, f64)],
     output_size: u32,
+    output_gsd: f64,
 ) -> Array2<u16> {
     let n = output_size as usize;
     let mut dst = Array2::<u16>::zeros((n, n));
+    let upsample_ratio = src_affine.pixel_width / output_gsd;
+    let use_nn = upsample_ratio > 1.5;
     for row in 0..n {
         for col in 0..n {
             let (utm_x, utm_y) = grid[row * n + col];
@@ -254,7 +279,11 @@ pub fn warp_band_with_grid(
                 continue;
             }
             let (src_col, src_row) = src_affine.crs_to_pixel(utm_x, utm_y);
-            dst[[row, col]] = bilinear_sample_u16(src, src_col, src_row);
+            dst[[row, col]] = if use_nn {
+                nn_sample_u16(src, src_col, src_row)
+            } else {
+                bicubic_sample_u16(src, src_col, src_row)
+            };
         }
     }
     dst

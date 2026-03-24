@@ -208,9 +208,10 @@ fn render_tiles_from_memory(
                     warp_scl_with_grid(scl_arr, scl_affine, &utm_grid, TILE_SIZE)
                 });
 
+                let output_gsd = tile_bbox_wm.width() / TILE_SIZE as f64;
                 let mut data = Array3::<u16>::zeros((n_bands, n, n));
                 for (b, (band_arr, band_affine)) in ls.bands.iter().enumerate() {
-                    let warped = warp_band_with_grid(band_arr, band_affine, &utm_grid, TILE_SIZE);
+                    let warped = warp_band_with_grid(band_arr, band_affine, &utm_grid, TILE_SIZE, output_gsd);
                     for r in 0..n {
                         for c in 0..n {
                             data[[b, r, c]] = warped[[r, c]];

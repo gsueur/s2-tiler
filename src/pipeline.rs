@@ -177,7 +177,7 @@ async fn render_scene(
         for (i, result) in band_results.into_iter().enumerate() {
             match result {
                 Ok((arr, affine)) => {
-                    let warped = warp_band_with_grid(&arr, &affine, &utm_grid, TILE_SIZE);
+                    let warped = warp_band_with_grid(&arr, &affine, &utm_grid, TILE_SIZE, desired_gsd);
                     band_arrays.push(warped);
                 }
                 Err(e) => {
