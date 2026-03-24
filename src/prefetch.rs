@@ -312,10 +312,9 @@ pub async fn prefetch_tileset(
                 let mut scene_refs = index.scenes_for_bbox(wgs84, max_scenes);
                 if config.temporal_priority {
                     scene_refs.sort_by(|a, b| {
-                        let (ay, am) = crate::pipeline::parse_year_month(&a.datetime);
-                        let (by, bm) = crate::pipeline::parse_year_month(&b.datetime);
+                        let (ay, _) = crate::pipeline::parse_year_month(&a.datetime);
+                        let (by, _) = crate::pipeline::parse_year_month(&b.datetime);
                         by.cmp(&ay)
-                            .then(bm.cmp(&am))
                             .then(a.cloud_cover.partial_cmp(&b.cloud_cover).unwrap_or(std::cmp::Ordering::Equal))
                     });
                 }

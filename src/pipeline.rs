@@ -59,10 +59,9 @@ pub async fn render_tile(
     // temporally homogeneous composites across adjacent tiles.
     if config.temporal_priority {
         scenes.sort_by(|a, b| {
-            let (ay, am) = parse_year_month(&a.datetime);
-            let (by, bm) = parse_year_month(&b.datetime);
+            let (ay, _) = parse_year_month(&a.datetime);
+            let (by, _) = parse_year_month(&b.datetime);
             by.cmp(&ay)
-                .then(bm.cmp(&am))
                 .then(a.cloud_cover.partial_cmp(&b.cloud_cover).unwrap_or(std::cmp::Ordering::Equal))
         });
     }
