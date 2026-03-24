@@ -1,15 +1,9 @@
 # S2 Tiler — example configuration
-# Covers Massachusetts (JJA 2023, true color, <20% cloud)
+# Copy to config.yaml and adjust extents, years, and bands.
 
-extent: [-73.6, 41.2, -69.8, 42.9]   # [west, south, east, north] WGS84
-years: [2023]
-season: [6, 7, 8]                     # June-July-August
-max_cloud_cover: 20
+# ── Global ────────────────────────────────────────────────────────────────────
 
-bands: [B04, B03, B02]               # true color RGB
-composite: best_pixel                 # best_pixel | median | latest
-rescale: [0, 3000]                    # S2 L2A SR range → [0, 255]
-
+port: 3000
 minzoom: 10
 maxzoom: 15
 quadkey_zoom: 8
@@ -17,5 +11,65 @@ quadkey_zoom: 8
 stac_url: https://earth-search.aws.element84.com/v1
 collection: sentinel-2-l2a
 
-port: 3000
-max_scenes_per_tile: 6
+# Shared DuckDB file for all mosaic indices (optional; omit to disable persistence)
+index_path: tilesets.db
+
+# Tile cache backend (optional; default: memory)
+tile_cache:
+  backend: memory   # none | memory | local | duckdb | s3 | r2
+
+# ── Tilesets ──────────────────────────────────────────────────────────────────
+
+tilesets:
+
+  # True color RGB (natural look)
+  # Bands: Red, Green, Blue
+  # Rescale: [0, 3000] is standard for S2 L2A surface reflectance
+  - name: massachusetts-truecolor
+    extent: [-73.6, 41.2, -69.8, 42.9]   # [west, south, east, north] WGS84
+    years: [2023, 2024]
+    season: [6, 7, 8]                     # June–August; omit for full year
+    max_cloud_cover: 20
+    bands: [B04, B03, B02]
+    composite: best_pixel                 # best_pixel | median | latest | ndvi
+    rescale: [0, 3000]
+    max_scenes_per_tile: 12
+
+  # False color NIR (vegetation appears red — classic remote sensing look)
+  # Bands: NIR, Red, Green
+  # Use case: vegetation health, land cover, deforestation
+  - name: massachusetts-falsecolor
+    extent: [-73.6, 41.2, -69.8, 42.9]
+    years: [2023, 2024]
+    season: [6, 7, 8]
+    max_cloud_cover: 20
+    bands: [B08, B04, B03]
+    composite: best_pixel
+    rescale: [0, 4000]
+    max_scenes_per_tile: 12
+
+  # SWIR false color (fire, burn scars, active geology)
+  # Bands: SWIR 2.2µm, NIR, Red
+  # Use case: burn scar mapping, bare soil, geology
+  - name: massachusetts-swir
+    extent: [-73.6, 41.2, -69.8, 42.9]
+    years: [2023, 2024]
+    season: [6, 7, 8]
+    max_cloud_cover: 20
+    bands: [B12, B08, B04]
+    composite: best_pixel
+    rescale: [0, 5000]
+    max_scenes_per_tile: 12
+
+  # NDVI — Normalized Difference Vegetation Index
+  # Bands: NIR, Red (exactly 2, in that order)
+  # Rescale: NDVI float range; [-1, 1] for full range, [0, 1] to emphasise green vegetation
+  - name: massachusetts-ndvi
+    extent: [-73.6, 41.2, -69.8, 42.9]
+    years: [2023, 2024]
+    season: [6, 7, 8]
+    max_cloud_cover: 20
+    bands: [B08, B04]
+    composite: ndvi
+    rescale: [-1, 1]
+    max_scenes_per_tile: 12

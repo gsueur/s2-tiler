@@ -219,12 +219,14 @@ tile_cache:
 
 Common band combinations and rescale values:
 
-| Composite | Bands | Rescale |
-|---|---|---|
-| True color | B04, B03, B02 | [0, 3000] |
-| False color NIR | B08, B04, B03 | [0, 4000] |
-| SWIR | B12, B08, B04 | [0, 5000] |
-| NDVI | B08, B04 | [-1, 1] or [0, 1] |
+| Name | Bands | Rescale | Use case |
+|---|---|---|---|
+| True color | `[B04, B03, B02]` | `[0, 3000]` | Natural look |
+| False color NIR | `[B08, B04, B03]` | `[0, 4000]` | Vegetation health, land cover (vegetation = red) |
+| SWIR | `[B12, B08, B04]` | `[0, 5000]` | Burn scars, active geology, bare soil |
+| SWIR-2 | `[B12, B8A, B04]` | `[0, 5000]` | Geology, moisture content |
+| Red edge | `[B07, B05, B02]` | `[0, 4000]` | Plant stress, canopy structure |
+| NDVI | `[B08, B04]` | `[-1, 1]` or `[0, 1]` | Vegetation index (requires `composite: ndvi`) |
 
 **NDVI** requires `composite: ndvi` and exactly 2 bands in order `[NIR, Red]`. The `rescale` values are interpreted as float NDVI units, not SR units. Use `[-1, 1]` to show the full index range, or `[0, 1]` to emphasise vegetation. Pixels where NIR + Red = 0 are treated as nodata.
 
