@@ -17,6 +17,15 @@ use tracing::debug;
 
 pub const TILE_SIZE: u32 = 256;
 
+/// Parse (year, month) from an ISO 8601 datetime string ("2024-06-15T...").
+/// Returns (0, 0) on parse failure.
+pub fn parse_year_month(dt: &str) -> (u32, u32) {
+    let mut parts = dt.splitn(3, '-');
+    let year = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let month = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    (year, month)
+}
+
 /// Render a single XYZ tile to a composited `SceneTile` (256×256, bands × height × width).
 pub async fn render_tile(
     z: u8,
@@ -38,11 +47,24 @@ pub async fn render_tile(
     let zoom_scale = 1usize << (config.maxzoom.saturating_sub(z).min(2) as usize);
     let effective_max = (config.max_scenes_per_tile * zoom_scale).min(config.max_scenes_per_tile * 4);
     let tile_wgs84 = webmercator_bbox_to_wgs84(&tile_bbox_wm);
-    let scenes = index.scenes_for_tile(z, x, y, effective_max, tile_wgs84);
+    let mut scenes = index.scenes_for_tile(z, x, y, effective_max, tile_wgs84);
 
     if scenes.is_empty() {
         debug!("No scenes for tile {z}/{x}/{y}");
         return Ok(None);
+    }
+
+    // Re-sort by (year desc, month desc, cloud cover asc) when temporal_priority is set.
+    // This ensures pixels are filled from the most recent year/month first, producing
+    // temporally homogeneous composites across adjacent tiles.
+    if config.temporal_priority {
+        scenes.sort_by(|a, b| {
+            let (ay, am) = parse_year_month(&a.datetime);
+            let (by, bm) = parse_year_month(&b.datetime);
+            by.cmp(&ay)
+                .then(bm.cmp(&am))
+                .then(a.cloud_cover.partial_cmp(&b.cloud_cover).unwrap_or(std::cmp::Ordering::Equal))
+        });
     }
 
     debug!(

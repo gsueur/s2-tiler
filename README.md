@@ -163,6 +163,7 @@ tilesets:
 | `max_scenes_per_tile` | no | 6 | Max scenes composited per tile (caps cold-tile latency) |
 | `haze_dn_max` | no | 0 (off) | Reject pixels where all bands exceed this DN value (thin haze/cloud). Typical values: 2400 for true-color `[0, 3000]`, 3200 for NIR `[0, 4000]`. Only used when `scl_masking: true` |
 | `scl_masking` | no | `true` | When `true`, pixels are filtered by SCL class (4/5/6/7 valid) and `haze_dn_max`. When `false`, any non-zero pixel in the scene footprint is used as-is — avoids false masking of bright surfaces (urban, sand, snow) at the cost of no cloud filtering |
+| `temporal_priority` | no | `false` | When `true`, scenes are sorted by most-recent year/month first, then cloud cover within each period. Produces more homogeneous composites — adjacent tiles draw from the same acquisition period before falling back to older scenes |
 
 ### Tile cache backends
 

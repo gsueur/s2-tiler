@@ -69,6 +69,13 @@ pub struct S2Config {
     #[serde(default = "default_scl_masking")]
     pub scl_masking: bool,
 
+    /// When true, scenes are sorted by most-recent year/month first, then cloud cover
+    /// within each period. Produces more temporally homogeneous composites — adjacent
+    /// tiles draw from the same year/month before falling back to older scenes.
+    /// Default false (sort by cloud cover only).
+    #[serde(default)]
+    pub temporal_priority: bool,
+
     // ── Injected from AppConfig after parsing ────────────────────────────────
 
     #[serde(skip_deserializing)]

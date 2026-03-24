@@ -309,7 +309,16 @@ pub async fn prefetch_tileset(
             tokio::spawn(async move {
                 let chunk_wm = chunk_wm_bbox(z, x_min, y_min, x_max, y_max);
                 let wgs84 = webmercator_bbox_to_wgs84(&chunk_wm);
-                let scene_refs = index.scenes_for_bbox(wgs84, max_scenes);
+                let mut scene_refs = index.scenes_for_bbox(wgs84, max_scenes);
+                if config.temporal_priority {
+                    scene_refs.sort_by(|a, b| {
+                        let (ay, am) = crate::pipeline::parse_year_month(&a.datetime);
+                        let (by, bm) = crate::pipeline::parse_year_month(&b.datetime);
+                        by.cmp(&ay)
+                            .then(bm.cmp(&am))
+                            .then(a.cloud_cover.partial_cmp(&b.cloud_cover).unwrap_or(std::cmp::Ordering::Equal))
+                    });
+                }
 
                 // --- skip_cached check: if all tiles in the chunk are already cached, skip ---
                 let tile_count = ((x_max - x_min + 1) * (y_max - y_min + 1)) as usize;
