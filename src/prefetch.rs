@@ -311,11 +311,32 @@ pub async fn prefetch_tileset(
                 let wgs84 = webmercator_bbox_to_wgs84(&chunk_wm);
                 let mut scene_refs = index.scenes_for_bbox(wgs84, max_scenes);
                 if config.temporal_priority {
+                    use crate::pipeline::parse_year_month;
+                    let max_year = scene_refs.iter()
+                        .map(|s| parse_year_month(&s.datetime).0)
+                        .max()
+                        .unwrap_or(0);
+                    let anchor_month = scene_refs.iter()
+                        .filter(|s| parse_year_month(&s.datetime).0 == max_year)
+                        .min_by(|a, b| a.cloud_cover.partial_cmp(&b.cloud_cover)
+                            .unwrap_or(std::cmp::Ordering::Equal))
+                        .map(|s| parse_year_month(&s.datetime).1)
+                        .unwrap_or(0);
                     scene_refs.sort_by(|a, b| {
-                        let (ay, _) = crate::pipeline::parse_year_month(&a.datetime);
-                        let (by, _) = crate::pipeline::parse_year_month(&b.datetime);
-                        by.cmp(&ay)
-                            .then(a.cloud_cover.partial_cmp(&b.cloud_cover).unwrap_or(std::cmp::Ordering::Equal))
+                        let (ay, am) = parse_year_month(&a.datetime);
+                        let (by, bm) = parse_year_month(&b.datetime);
+                        by.cmp(&ay).then_with(|| {
+                            if ay == by {
+                                a.cloud_cover.partial_cmp(&b.cloud_cover)
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                            } else {
+                                let dist_a = (am as i32 - anchor_month as i32).abs();
+                                let dist_b = (bm as i32 - anchor_month as i32).abs();
+                                dist_a.cmp(&dist_b)
+                                    .then(a.cloud_cover.partial_cmp(&b.cloud_cover)
+                                        .unwrap_or(std::cmp::Ordering::Equal))
+                            }
+                        })
                     });
                 }
 

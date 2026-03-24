@@ -58,11 +58,40 @@ pub async fn render_tile(
     // This ensures pixels are filled from the most recent year/month first, producing
     // temporally homogeneous composites across adjacent tiles.
     if config.temporal_priority {
+        // Step 1: find the most recent year present in the candidate scenes.
+        let max_year = scenes.iter()
+            .map(|s| parse_year_month(&s.datetime).0)
+            .max()
+            .unwrap_or(0);
+
+        // Step 2: anchor month = month of the lowest-cloud scene in that year.
+        // Fallback scenes from older years will be sorted by proximity to this month
+        // to minimise seasonal disharmony.
+        let anchor_month = scenes.iter()
+            .filter(|s| parse_year_month(&s.datetime).0 == max_year)
+            .min_by(|a, b| a.cloud_cover.partial_cmp(&b.cloud_cover)
+                .unwrap_or(std::cmp::Ordering::Equal))
+            .map(|s| parse_year_month(&s.datetime).1)
+            .unwrap_or(0);
+
         scenes.sort_by(|a, b| {
-            let (ay, _) = parse_year_month(&a.datetime);
-            let (by, _) = parse_year_month(&b.datetime);
-            by.cmp(&ay)
-                .then(a.cloud_cover.partial_cmp(&b.cloud_cover).unwrap_or(std::cmp::Ordering::Equal))
+            let (ay, am) = parse_year_month(&a.datetime);
+            let (by, bm) = parse_year_month(&b.datetime);
+            // Most recent year first
+            by.cmp(&ay).then_with(|| {
+                if ay == by {
+                    // Same year: sort by cloud cover only
+                    a.cloud_cover.partial_cmp(&b.cloud_cover)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                } else {
+                    // Older years: prefer month closest to the anchor, then cloud cover
+                    let dist_a = (am as i32 - anchor_month as i32).abs();
+                    let dist_b = (bm as i32 - anchor_month as i32).abs();
+                    dist_a.cmp(&dist_b)
+                        .then(a.cloud_cover.partial_cmp(&b.cloud_cover)
+                            .unwrap_or(std::cmp::Ordering::Equal))
+                }
+            })
         });
     }
 
