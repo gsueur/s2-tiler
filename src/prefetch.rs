@@ -325,18 +325,12 @@ pub async fn prefetch_tileset(
                     scene_refs.sort_by(|a, b| {
                         let (ay, am) = parse_year_month(&a.datetime);
                         let (by, bm) = parse_year_month(&b.datetime);
-                        by.cmp(&ay).then_with(|| {
-                            if ay == by {
-                                a.cloud_cover.partial_cmp(&b.cloud_cover)
-                                    .unwrap_or(std::cmp::Ordering::Equal)
-                            } else {
-                                let dist_a = (am as i32 - anchor_month as i32).abs();
-                                let dist_b = (bm as i32 - anchor_month as i32).abs();
-                                dist_a.cmp(&dist_b)
-                                    .then(a.cloud_cover.partial_cmp(&b.cloud_cover)
-                                        .unwrap_or(std::cmp::Ordering::Equal))
-                            }
-                        })
+                        let dist_a = (am as i32 - anchor_month as i32).abs();
+                        let dist_b = (bm as i32 - anchor_month as i32).abs();
+                        by.cmp(&ay)
+                            .then(dist_a.cmp(&dist_b))
+                            .then(a.cloud_cover.partial_cmp(&b.cloud_cover)
+                                .unwrap_or(std::cmp::Ordering::Equal))
                     });
                 }
 
