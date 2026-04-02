@@ -4,17 +4,6 @@ Standalone async Sentinel-2 COG tile server.
 
 Searches Earth Search STAC for Sentinel-2 L2A scenes, builds a spatial index, and serves XYZ PNG/JPEG tiles via HTTP by reading Cloud-Optimized GeoTIFFs directly from S3. Multiple named tilesets are served from a single process, each with its own spatial extent, date range, and band configuration.
 
-**Performance (local dev → S3 us-west-2)**
-
-| Scenario | Latency |
-|---|---|
-| True cold (no caches) | ~1.1s |
-| Header-warm, pixel fetch | ~1.2–1.7s |
-| Tile cache hit (memory) | 10–13ms |
-| Python/titiler baseline | 3.5–8s |
-
-On co-located AWS infrastructure (same region as the S3 bucket), cold tiles are typically 150–400ms.
-
 ---
 
 ## Requirements
